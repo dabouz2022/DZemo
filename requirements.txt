@@ -1,0 +1,12 @@
+streamlit
+pandas
+plotly
+torch
+torchvision
+transformers
+crawl4ai
+litellm
+wordcloud
+matplotlib
+arabic_reshaper
+python-bidi
