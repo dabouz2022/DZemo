@@ -181,6 +181,24 @@ def launch_real_chrome_for_cdp(url, profile, mobile_mode=True):
     }
 
 
+def extract_top_keywords(texts, top_n=10):
+    """Simple keyword extraction excluding common Arabic/French/English stop words."""
+    import re
+    from collections import Counter
+    
+    stop_words = {
+        'le', 'la', 'les', 'et', 'en', 'un', 'une', 'du', 'des', 'de', 'pour', 'sur', 'dans', 'avec', 'est', 'sont',
+        'في', 'من', 'على', 'و', 'ان', 'هو', 'هي', 'ما', 'لا', 'يا', 'هذا', 'التي', 'الذي', 'Ramy', 'Rami', 'Food'
+    }
+    words = []
+    for text in texts:
+        # Lowercase and keep only alphanumeric
+        clean_text = re.sub(r'[^\w\s]', '', str(text).lower())
+        words.extend([w for w in clean_text.split() if len(w) > 2 and w not in stop_words])
+    
+    return Counter(words).most_common(top_n)
+
+
 def cleanup_chrome_runtime(runtime):
     if not runtime or not isinstance(runtime, dict):
         return
@@ -1244,8 +1262,38 @@ def render_results(results):
         st.warning("No comments to display.")
         return
 
-    df = pd.DataFrame(results)
-    logger.info(f"Rendering {len(df)} results.")
+    df_base = pd.DataFrame(results)
+    
+    # ── Interactive Sidebar Filters ────────────────────────────────────────
+    st.sidebar.markdown("""
+        <div style='background:rgba(255,255,255,0.03); padding:16px; border-radius:12px; border:1px solid rgba(255,255,255,0.1); margin-bottom:20px;'>
+            <div style='font-weight:700; color:#fff; font-size:0.9rem; margin-bottom:12px;'>🔍 INSIGHT FILTERS</div>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    with st.sidebar:
+        # 1. Emotion Filter
+        emotions_available = sorted(df_base["Emotion"].unique().tolist())
+        selected_emotions = st.multiselect("Filter by Emotion:", emotions_available, default=emotions_available)
+        
+        # 2. Priority Filter
+        prio_only = st.toggle("🚨 High Priority Only", value=False)
+        
+        # 3. Keyword Search
+        search_query = st.text_input("Find in comments...", placeholder="e.g. 'Ramy', 'Sucre'")
+
+    # Apply Filters
+    df = df_base[df_base["Emotion"].isin(selected_emotions)].copy()
+    if prio_only:
+        df = df[df["High Priority"] == "🚨 YES"]
+    if search_query:
+        df = df[df["Comment"].str.contains(search_query, case=False, na=False)]
+
+    if df.empty:
+        st.info("No comments match your current filters. Try broadening your search!")
+        return
+
+    logger.info(f"Rendering {len(df)} filtered results.")
 
     high_prio_count = (df["High Priority"] == "🚨 YES").sum()
     top_emotion = df["Emotion"].value_counts().index[0] if len(df) > 0 else "N/A"
@@ -1298,6 +1346,27 @@ def render_results(results):
                 </div>
             """, unsafe_allow_html=True)
 
+    # ── Sentiment Trend ──────────────────────────────────────────────────
+    st.markdown('<div class="section-title">Sentiment Evolution</div>', unsafe_allow_html=True)
+    try:
+        # Simple date parsing attempt for trend
+        df['dt'] = pd.to_datetime(df['Timestamp'], errors='coerce')
+        df_trend = df.dropna(subset=['dt']).sort_values('dt')
+        if not df_trend.empty:
+            trend_data = df_trend.groupby([df_trend['dt'].dt.date, 'Emotion']).size().reset_index(name='Count')
+            fig_trend = px.area(trend_data, x='dt', y='Count', color='Emotion',
+                                color_discrete_map={e: EMOTION_META.get(e, {}).get('color', '#6366f1') for e in emotion_counts['Emotion']})
+            fig_trend.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                font_color='#888', height=280, margin=dict(t=10, b=10, l=10, r=10),
+                xaxis_title="", yaxis_title=""
+            )
+            st.plotly_chart(fig_trend, width='stretch')
+        else:
+            st.info("No valid timestamps found for trend analysis.")
+    except Exception as te:
+        logger.debug(f"Trend chart skipped: {te}")
+
     # ── Charts ─────────────────────────────────────────────────────────────
     emotion_counts = df['Emotion'].value_counts().reset_index()
     emotion_counts.columns = ['Emotion', 'Count']
@@ -1330,44 +1399,51 @@ def render_results(results):
         )
         st.plotly_chart(fig_donut, width='stretch')
 
-    with col2:
-        st.markdown('<div class="section-title">Volume</div>', unsafe_allow_html=True)
-        fig_bar = px.bar(emotion_counts, x='Count', y='Emotion', orientation='h',
-                         color='Emotion',
-                         color_discrete_map={e: EMOTION_META.get(e, {}).get('color', '#6366f1') for e in emotion_counts['Emotion']})
-        
-        fig_bar.update_traces(
-            marker_line_width=0, 
-            opacity=1.0,
-            hovertemplate="<b>%{y}</b>: %{x}<extra></extra>"
-        )
-        fig_bar.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-            font_color='#aaaaaa', 
-            font_family='Montserrat',
-            showlegend=False,
-            yaxis=dict(autorange="reversed", title="", showgrid=False, tickfont=dict(size=10)),
-            xaxis=dict(title="", showgrid=True, gridcolor='#333333', tickfont=dict(size=10)),
-            margin=dict(t=10, b=10, l=10, r=20),
-            height=340,
-            hoverlabel=dict(bgcolor="#ffffff", font_color="#000000", font_size=12, font_family="Montserrat")
-        )
         st.plotly_chart(fig_bar, width='stretch')
 
-    # ── Comment Cards ──
-    st.markdown('<div class="section-title">Feed</div>', unsafe_allow_html=True)
+    # ── Keyword Highlights ─────────────────────────────────────────────────
+    st.markdown('<div class="section-title">Keyword Highlights</div>', unsafe_allow_html=True)
+    keywords = extract_top_keywords(df["Comment"].tolist())
+    if keywords:
+        fig_keys = px.bar(
+            x=[k[0] for k in keywords], y=[k[1] for k in keywords],
+            labels={'x': 'Word', 'y': 'Frequency'}
+        )
+        fig_keys.update_traces(marker_color='#ffffff', opacity=0.8)
+        fig_keys.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            font_color='#888', font_family='Inter', height=250,
+            xaxis_title="", yaxis_title="", margin=dict(t=10, b=10, l=10, r=10)
+        )
+        st.plotly_chart(fig_keys, width='stretch')
+
+    # ── Premium Comment List (Cards) ───────────────────────────────────────
+    st.markdown('<div class="section-title">Analysis Stream</div>', unsafe_allow_html=True)
     for _, row in df.iterrows():
-        emotion = row["Emotion"]
-        meta = EMOTION_META.get(emotion, {'emoji': '❓', 'color': '#ffffff'})
-        priority_badge = f' <span style="color:#ffffff;font-size:0.6rem;font-weight:700;letter-spacing:0.2em;border:1px solid #ffffff;padding:2px 8px;margin-left:8px;">HIGH PRIORITY</span>' if row["High Priority"] == "🚨 YES" else ''
-        text = str(row['Comment']).replace('<', '&lt;').replace('>', '&gt;')
+        meta = EMOTION_META.get(row['Emotion'], {'emoji': '💬', 'color': '#6366f1'})
+        prio_style = "border-left: 4px solid #ef4444; background: rgba(239, 68, 68, 0.05);" if row["High Priority"] == "🚨 YES" else "border-left: 2px solid #333;"
+        
         st.markdown(f"""
-        <div style="background:#181818; border:1px solid #333; padding:24px; margin-bottom:16px;">
-            <div style="font-size:0.9rem; color:#eeeeee; line-height:1.6; margin-bottom:20px; direction:auto; font-weight:400;">{text}</div>
-            <div style="display:flex; align-items:center;">
-                <span style="font-size:0.65rem; font-weight:700; color:#888; text-transform:uppercase; letter-spacing:0.15em;">
-                    {meta['emoji']} {emotion}
-                </span>{priority_badge}
+        <div class="comment-card" style="{prio_style} margin-bottom: 12px; padding: 20px; border-radius: 8px; background: rgba(255,255,255,0.02);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <div style="display:flex; align-items:center;">
+                    <div style="width:32px; height:32px; border-radius:50%; background:{meta['color']}; display:flex; align-items:center; justify-content:center; margin-right:12px; font-weight:bold; color:white;">
+                        {row['User'][0].upper() if row['User'] else '?'}
+                    </div>
+                    <div>
+                        <div style="font-weight:700; color:#fff; font-size:0.9rem;">{row['User'] or 'Anonymous'}</div>
+                        <div style="font-size:0.75rem; color:#666;">{row['Timestamp']}</div>
+                    </div>
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <span style="background:{meta['color']}22; color:{meta['color']}; padding:4px 10px; border-radius:4px; font-size:0.7rem; font-weight:700; border:1px solid {meta['color']}44;">
+                        {meta['emoji']} {row['Emotion'].upper()}
+                    </span>
+                    {"<span style='background:#ef444422; color:#ef4444; padding:4px 10px; border-radius:4px; font-size:0.7rem; font-weight:700; border:1px solid #ef444444;'>🚨 HIGH PRIORITY</span>" if row["High Priority"] == "🚨 YES" else ""}
+                </div>
+            </div>
+            <div style="color:#e5e7eb; font-size:0.95rem; line-height:1.6; margin-left:44px;">
+                {row['Comment']}
             </div>
         </div>
         """, unsafe_allow_html=True)
