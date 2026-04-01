@@ -55,11 +55,24 @@ def find_real_chrome_executable():
             Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
             Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         ])
-    else:
+    elif sys.platform.startswith("linux"):
         for binary in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]:
             located = shutil.which(binary)
             if located:
                 candidates.append(Path(located))
+        
+        # Check Playwright's cache directory (common in CI/CD and server environments)
+        # Search patterns: ~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome
+        playwright_cache = Path.home() / ".cache" / "ms-playwright"
+        if playwright_cache.exists():
+            try:
+                for chrom_dir in playwright_cache.glob("chromium-*"):
+                    for platform_dir in chrom_dir.glob("chrome-linux*"):
+                        chrome_bin = platform_dir / "chrome"
+                        if chrome_bin.exists():
+                            candidates.append(chrome_bin)
+            except Exception:
+                pass
 
     for candidate in candidates:
         if candidate and candidate.exists():
