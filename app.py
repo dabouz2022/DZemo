@@ -182,6 +182,8 @@ def launch_real_chrome_for_cdp(url, profile, mobile_mode=True):
 
 
 def cleanup_chrome_runtime(runtime):
+    if not runtime or not isinstance(runtime, dict):
+        return
     process = runtime.get("process")
     if process:
         try:
@@ -805,8 +807,7 @@ async def scrape_facebook_comments_better_way(url):
     seen_global = set()
 
     # Reuse the runtime detection and virtual display logic
-    runtime = ensure_runtime_dir(CHROME_RUNTIME_DIR)
-    maybe_start_virtual_display(1280, 800)
+    runtime = {"display": maybe_start_virtual_display(1280, 800)}
     
     try:
         async with async_playwright() as p:
