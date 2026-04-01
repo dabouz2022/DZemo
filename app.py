@@ -6,22 +6,168 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import os
+import re
 import json
+import html as html_lib
 import logging
+import random
+import time
+import shutil
+import socket
+import subprocess
+from pathlib import Path
+from contextlib import nullcontext
+from urllib.parse import urlparse, urlunparse
 import pandas as pd
 import plotly.express as px
 import torch
 from transformers import BertTokenizer, BertForSequenceClassification
-from crawl4ai import AsyncWebCrawler
+from playwright.async_api import async_playwright
 import litellm
-from wordcloud import WordCloud
-import matplotlib.pyplot as plt
-import arabic_reshaper
-from bidi.algorithm import get_display
+try:
+    from pyvirtualdisplay import Display
+except Exception:
+    Display = None
 
 # Configure Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+RUNTIME_DIR = Path(".runtime")
+CHROME_RUNTIME_DIR = RUNTIME_DIR / "chrome"
+
+
+def ensure_runtime_dir(path):
+    Path(path).mkdir(parents=True, exist_ok=True)
+    return Path(path)
+
+
+def find_real_chrome_executable():
+    candidates = []
+    if sys.platform == "win32":
+        candidates.extend([
+            Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+            Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "Application" / "chrome.exe",
+        ])
+    elif sys.platform == "darwin":
+        candidates.extend([
+            Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ])
+    else:
+        for binary in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]:
+            located = shutil.which(binary)
+            if located:
+                candidates.append(Path(located))
+
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return str(candidate)
+    return None
+
+
+def get_free_tcp_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        return sock.getsockname()[1]
+
+
+def wait_for_cdp_ready(port, timeout=30):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return True
+        except OSError:
+            time.sleep(0.4)
+    return False
+
+
+def maybe_start_virtual_display(width, height):
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY") and Display:
+        display = Display(visible=False, size=(max(width, 1280), max(height, 900)))
+        display.start()
+        return display
+    return nullcontext()
+
+
+def launch_real_chrome_for_cdp(url, profile, mobile_mode=True):
+    chrome_path = find_real_chrome_executable()
+    if not chrome_path:
+        raise RuntimeError("Real Google Chrome executable was not found.")
+
+    ensure_runtime_dir(CHROME_RUNTIME_DIR)
+    profile_dir = ensure_runtime_dir(CHROME_RUNTIME_DIR / profile["name"])
+    port = get_free_tcp_port()
+    width = profile["viewport"]["width"]
+    height = profile["viewport"]["height"]
+    display = maybe_start_virtual_display(width, height)
+    if hasattr(display, "__enter__"):
+        display = display.__enter__()
+
+    args = [
+        chrome_path,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile_dir}",
+        f"--window-size={width},{height}",
+        "--lang=fr-FR",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-sync",
+        "--disable-extensions",
+        "--disable-features=Translate,OptimizationHints,MediaRouter",
+        "--new-window",
+    ]
+    if mobile_mode:
+        args.append(
+            f"--user-agent={profile['user_agent']}"
+        )
+    args.append(url)
+
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+    )
+
+    if not wait_for_cdp_ready(port, timeout=35):
+        try:
+            process.terminate()
+        except Exception:
+            pass
+        if hasattr(display, "stop"):
+            display.stop()
+        raise RuntimeError("Chrome CDP port did not become ready.")
+
+    return {
+        "process": process,
+        "port": port,
+        "display": display,
+    }
+
+
+def cleanup_chrome_runtime(runtime):
+    process = runtime.get("process")
+    if process:
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+    display = runtime.get("display")
+    if display and hasattr(display, "stop"):
+        try:
+            display.stop()
+        except Exception:
+            pass
 
 # Page config
 st.set_page_config(page_title="DzEmotion Dashboard", page_icon="🇩🇿", layout="wide")
@@ -56,129 +202,572 @@ def predict_emotion(text, tokenizer, model):
         return EMOTION_CLASSES[predicted_class_id]
     return "Unknown"
 
+
+def normalize_scraped_text(text):
+    if not text:
+        return ""
+    text = html_lib.unescape(str(text))
+    return re.sub(r"\s+", " ", text.replace("\u200b", " ").replace("\u00a0", " ").replace("\ufeff", " ")).strip()
+
+
+def clean_comment_text(text):
+    """Strip markdown and UI residue while preserving readable comment content."""
+    text = normalize_scraped_text(text)
+    text = re.sub(r'!\[([^\]]{0,40})\]\([^)]+\)', r'\1', text)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = text.lstrip("!")
+    text = re.sub(r'^[>*\-\s]+', '', text)
+    return normalize_scraped_text(text)
+
+
+def is_ui_residue_comment(text):
+    value = normalize_scraped_text(text).lower()
+    if not value:
+        return True
+    patterns = [
+        r'^view \d+ repl',
+        r'^view more',
+        r'^view previous',
+        r'^afficher \d+ r',
+        r'^afficher plus',
+        r'^charger plus',
+        r'^most relevant$',
+        r'^all comments$',
+        r'^newest$',
+        r'^comments?$',
+        r'^likes?$',
+        r'^replies$',
+    ]
+    return any(re.search(pattern, value) for pattern in patterns)
+
+
+MOBILE_BROWSER_PROFILES = [
+    {
+        "name": "iphone_390x844",
+        "viewport": {"width": 390, "height": 844},
+        "user_agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 "
+            "Mobile/15E148 Safari/604.1"
+        ),
+        "locale": "fr-FR",
+    },
+]
+
+FACEBOOK_LOADING_MARKERS = [
+    "loading comments",
+    "loading more comments",
+    "please wait",
+    "be patient",
+    "chargement des commentaires",
+    "chargement",
+    "veuillez patienter",
+    "patientez",
+    "kommentare werden geladen",
+    "kommentare laden",
+    "bitte warten",
+    "einen moment bitte",
+]
+
+FACEBOOK_GATE_MARKERS = [
+    "découvrez plus de contenu",
+    "discover more content",
+    "mehr inhalte entdecken",
+    "ce contenu n'est pas disponible hors connexion",
+    "this content isn't available unless you log in",
+    "dieser inhalt ist nur nach der anmeldung verfügbar",
+]
+
+FACEBOOK_END_MARKERS = [
+    "publications récentes",
+    "recent posts",
+    "neueste beiträge",
+    "related pages",
+    "pages similaires",
+]
+
+FACEBOOK_TIMESTAMP_RE = re.compile(
+    r"(?:^|\b)(?:\d+\s*(?:s|min|h|d|j|w|sem|mo|an|ans|yr|yrs)|hier|yesterday|today|aujourd'hui|gestern|heute)(?:\b|$)",
+    re.IGNORECASE,
+)
+
+
+def to_m_facebook_url(url):
+    parsed = urlparse(url.strip())
+    if not parsed.scheme:
+        parsed = urlparse(f"https://{url.strip()}")
+    netloc = parsed.netloc.lower()
+    if "facebook.com" not in netloc and "fb.com" not in netloc:
+        return url.strip()
+    if netloc.endswith("fb.com"):
+        netloc = "m.facebook.com"
+    else:
+        netloc = re.sub(r"^(?:www|m)\.", "", netloc)
+        netloc = f"m.{netloc}"
+    return urlunparse((parsed.scheme or "https", netloc, parsed.path, parsed.params, parsed.query, ""))
+
+
+def to_www_facebook_url(url):
+    parsed = urlparse(url.strip())
+    if not parsed.scheme:
+        parsed = urlparse(f"https://{url.strip()}")
+    netloc = parsed.netloc.lower()
+    if "facebook.com" not in netloc and "fb.com" not in netloc:
+        return url.strip()
+    if netloc.endswith("fb.com"):
+        netloc = "www.facebook.com"
+    else:
+        netloc = re.sub(r"^(?:m|www)\.", "", netloc)
+        netloc = f"www.{netloc}"
+    return urlunparse((parsed.scheme or "https", netloc, parsed.path, parsed.params, parsed.query, ""))
+
+
+def normalize_name_for_match(text):
+    value = normalize_scraped_text(text)
+    value = re.sub(r"[.\u2026!?,:;،؛'\"`~_^*+=/\\|()\[\]{}<>-]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip().lower()
+    return value
+
+
+def looks_like_profile_name_only(text, user=""):
+    value = clean_comment_text(text)
+    if not value:
+        return True
+    normalized_value = normalize_name_for_match(value)
+    normalized_user = normalize_name_for_match(user)
+    if normalized_user and normalized_value == normalized_user:
+        return True
+    if any(char.isdigit() for char in normalized_value):
+        return False
+    if re.search(r"[\u0600-\u06FF]", normalized_value):
+        return False
+    if len(normalized_value) > 40:
+        return False
+    if len(normalized_value.split()) < 2 or len(normalized_value.split()) > 5:
+        return False
+    if re.fullmatch(r"[a-zà-öø-ÿ]+(?: [a-zà-öø-ÿ]+){1,4}", normalized_value):
+        return True
+    title_case_value = re.sub(r"\.+$", "", value).strip()
+    if re.fullmatch(r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’-]+(?: [A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’-]+){1,4}", title_case_value):
+        return True
+    return False
+
+
+def normalize_comment_records(records):
+    cleaned = []
+    seen = set()
+    for item in records or []:
+        if not isinstance(item, dict):
+            item = {"text": str(item), "user": "", "timestamp": "Unknown"}
+        user = normalize_scraped_text(item.get("user", ""))
+        text = clean_comment_text(item.get("text", ""))
+        timestamp = normalize_scraped_text(item.get("timestamp", "")) or "Unknown"
+        if not text or is_ui_residue_comment(text):
+            continue
+        if looks_like_profile_name_only(text, user=user):
+            continue
+        if len(text) < 2:
+            continue
+        dedupe_key = (user.lower(), text.lower())
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        cleaned.append({"user": user, "text": text, "timestamp": timestamp})
+    return cleaned
+
+
+async def jitter_pause(page, low_ms=350, high_ms=850):
+    await page.wait_for_timeout(random.randint(low_ms, high_ms))
+
+
+async def get_facebook_page_and_context(browser, target_url):
+    contexts = browser.contexts
+    if contexts:
+        context = contexts[0]
+    else:
+        context = await browser.new_context()
+    for page in context.pages:
+        if "facebook.com" in page.url:
+            return context, page
+    page = await context.new_page()
+    await page.goto(target_url, wait_until="domcontentloaded")
+    return context, page
+
+
+async def close_facebook_popup_x(page):
+    close_selectors = [
+        '[role="dialog"] [aria-label="Fermer"]',
+        '[role="dialog"] [aria-label="Close"]',
+        '[role="dialog"] [aria-label="Schließen"]',
+        '[aria-modal="true"] [aria-label="Fermer"]',
+        '[aria-modal="true"] [aria-label="Close"]',
+        '[aria-modal="true"] [aria-label="Schließen"]',
+        '[role="dialog"] [data-testid="cookie-policy-dialog-close-button"]',
+    ]
+    for selector in close_selectors:
+        locator = page.locator(selector).first
+        try:
+            if await locator.count():
+                await locator.scroll_into_view_if_needed(timeout=1000)
+                box = await locator.bounding_box()
+                if box:
+                    await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=8)
+                    await jitter_pause(page, 120, 260)
+                    await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                    await jitter_pause(page, 450, 900)
+                    logger.info(f"Closed Facebook popup via visible X button using selector: {selector}")
+                    return True
+        except Exception:
+            continue
+
+    try:
+        dialog = page.locator('[role="dialog"], [aria-modal="true"]').first
+        if await dialog.count():
+            buttons = dialog.locator('div[role="button"], button')
+            count = await buttons.count()
+            for idx in range(min(count, 12)):
+                candidate = buttons.nth(idx)
+                text = normalize_scraped_text(await candidate.inner_text())
+                if text in {"X", "x", "×", "✕"}:
+                    box = await candidate.bounding_box()
+                    if box:
+                        await page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2, steps=8)
+                        await jitter_pause(page, 120, 260)
+                        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                        await jitter_pause(page, 450, 900)
+                        logger.info("Closed Facebook popup via glyph X button.")
+                        return True
+    except Exception:
+        pass
+    return False
+
+
+async def recover_mobile_post_page(page, original_url):
+    page_text = normalize_scraped_text(await page.locator("body").inner_text()).lower()
+    page_title = (await page.title()).lower()
+    unavailable_markers = [
+        "ce contenu n'est pas disponible hors connexion",
+        "this content isn't available unless you log in",
+        "page indisponible",
+        "page unavailable",
+    ]
+    if any(marker in page_text for marker in unavailable_markers) or any(marker in page_title for marker in unavailable_markers):
+        logger.info(f"Facebook mobile tab drifted to unavailable page ({page.url}); reloading original post.")
+        await page.goto(original_url, wait_until="domcontentloaded")
+        await page.wait_for_timeout(1500)
+        return True
+    return False
+
+
+async def try_select_all_comments(page):
+    sort_buttons = [
+        page.get_by_role("button", name=re.compile(r"Most relevant|Plus pertinents|Relevanteste", re.I)),
+        page.get_by_text(re.compile(r"Most relevant|Plus pertinents|Relevanteste", re.I)),
+    ]
+    option_patterns = re.compile(r"All comments|Tous les commentaires|Alle Kommentare", re.I)
+
+    for button in sort_buttons:
+        try:
+            if await button.count():
+                await button.first.click(timeout=1500)
+                await page.wait_for_timeout(700)
+                option = page.get_by_text(option_patterns).first
+                if await option.count():
+                    await option.click(timeout=1500)
+                    await page.wait_for_timeout(1200)
+                    logger.info("Facebook comment sort switched to All comments.")
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+async def wait_for_facebook_loading_to_finish(page, max_rounds=5):
+    """Wait for Facebook's dynamic content to finish rendering specialized for comments."""
+    for i in range(max_rounds):
+        # We check for specific visible loading elements or text within the main content area
+        # Checking the entire body text is too prone to false positives from static footers/sidebars
+        loading_visible = False
+        try:
+            # Check for standard Facebook loading markers if they are actually visible
+            specific_markers = [
+                "loading comments", "chargement des commentaires", "kommentare werden geladen",
+                "loading more comments", "chargement...", "veuillez patienter", "patientez"
+            ]
+            for marker in specific_markers:
+                # Use a locator that only looks for visible elements containing this text
+                if await page.get_by_text(re.compile(marker, re.I)).first.is_visible():
+                    loading_visible = True
+                    break
+            
+            # Also check for progress bars or explicit loading indicators
+            if not loading_visible:
+                loading_visible = await page.locator('[role="progressbar"], svg[aria-label*="Loading"], div[aria-busy="true"]').first.is_visible()
+        except Exception:
+            loading_visible = False
+            
+        if not loading_visible:
+            if i > 0:
+                logger.info("Facebook loading state cleared.")
+            break
+            
+        logger.info(f"Detected Facebook loading state (round {i+1}); waiting for comments to render...")
+        await page.wait_for_timeout(1000)
+
+
+async def extract_structured_comments_from_page(page):
+    records = await page.evaluate(
+        """
+        () => {
+            const normalize = (value) => (value || '').replace(/\\u00a0/g, ' ').replace(/\\u200b/g, ' ').replace(/\\s+/g, ' ').trim();
+            const splitLines = (value) => normalize(value).split(/\\n+/).map(normalize).filter(Boolean);
+            const uiPattern = /^(view \\d+ repl|view more|view previous|afficher \\d+ r|afficher plus|charger plus|most relevant|all comments|newest|comments?|likes?|replies|j['’]?aime|répondre|reply)$/i;
+            const endPattern = /(recent posts|publications récentes|related pages)/i;
+            const timePattern = /(^|\\b)(\\d+\\s*(s|min|h|d|j|w|sem|mo|an|ans|yr|yrs)|hier|yesterday|today|aujourd'hui|gestern|heute)(\\b|$)/i;
+            const visible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+            };
+            const records = [];
+            const seen = new Set();
+            const anchors = Array.from(document.querySelectorAll('a[href]')).filter(visible);
+
+            const getCandidateFromRoot = (root, userHint) => {
+                if (!root || !visible(root)) return null;
+                const lines = splitLines(root.innerText).slice(0, 10);
+                if (lines.length < 2) return null;
+                if (endPattern.test(lines.join(' '))) return null;
+                const user = normalize(userHint || lines[0]);
+                if (!user || user.length > 60) return null;
+                let timestamp = 'Unknown';
+                const body = [];
+                for (const line of lines) {
+                    if (!line || line === user) continue;
+                    if (uiPattern.test(line)) continue;
+                    if (timePattern.test(line) && timestamp === 'Unknown') {
+                        timestamp = line;
+                        continue;
+                    }
+                    if (line.length >= 2) {
+                        body.push(line);
+                    }
+                }
+                const text = normalize(body.join(' '));
+                if (!text || text === user || text.length > 450) return null;
+                return { user, text, timestamp };
+            };
+
+            for (const anchor of anchors) {
+                const user = normalize(anchor.innerText);
+                if (!user || user.length < 2 || user.length > 60) continue;
+                if (/^(facebook|connexion|se connecter|log in|login|ramy food)$/i.test(user)) continue;
+                let root = anchor;
+                for (let depth = 0; depth < 6 && root; depth += 1) {
+                    root = root.parentElement;
+                    const candidate = getCandidateFromRoot(root, user);
+                    if (!candidate) continue;
+                    const key = `${candidate.user}||${candidate.text}`;
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        records.push(candidate);
+                    }
+                    break;
+                }
+            }
+
+            return records;
+        }
+        """
+    )
+    return normalize_comment_records(records)
+
+
+def extract_comments_from_body_text(body_text):
+    lines = [normalize_scraped_text(line) for line in body_text.splitlines()]
+    lines = [line for line in lines if line]
+    records = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        lowered = line.lower()
+
+        if any(marker in lowered for marker in FACEBOOK_END_MARKERS):
+            break
+        if lowered in {"super fan", "top fan"} or line.startswith("󱘫"):
+            i += 1
+            continue
+        if FACEBOOK_TIMESTAMP_RE.search(line) or is_ui_residue_comment(line):
+            i += 1
+            continue
+        if re.fullmatch(r"[\d.,]+\s*[kKmM]?", line):
+            i += 1
+            continue
+        if len(line) > 80:
+            i += 1
+            continue
+        if not re.search(r"[A-Za-zÀ-ÿ\u0600-\u06FF]", line):
+            i += 1
+            continue
+        if "autres personnes" in lowered or "other people" in lowered or lowered.startswith("afficher les réponses"):
+            i += 1
+            continue
+
+        timestamp_idx = None
+        for j in range(i + 1, min(i + 7, len(lines))):
+            probe = lines[j]
+            if any(marker in probe.lower() for marker in FACEBOOK_END_MARKERS):
+                break
+            if FACEBOOK_TIMESTAMP_RE.search(probe):
+                timestamp_idx = j
+                break
+
+        if timestamp_idx is None:
+            i += 1
+            continue
+
+        user = line
+        text_lines = []
+        for k in range(i + 1, timestamp_idx):
+            current = lines[k]
+            current_lower = current.lower()
+            if current_lower in {"super fan", "top fan"} or current.startswith("󱘫"):
+                continue
+            if is_ui_residue_comment(current):
+                continue
+            if re.fullmatch(r"[\d.,]+\s*[kKmM]?", current):
+                continue
+            if "autres personnes" in current_lower or current_lower.startswith("afficher les réponses"):
+                continue
+            if not re.search(r"[A-Za-zÀ-ÿ\u0600-\u06FF]", current):
+                continue
+            text_lines.append(current)
+
+        text = clean_comment_text(" ".join(text_lines))
+        if text and not looks_like_profile_name_only(text, user=user):
+            records.append({"user": user, "text": text, "timestamp": lines[timestamp_idx]})
+
+        i = timestamp_idx + 1
+        while i < len(lines):
+            trailing = lines[i]
+            trailing_lower = trailing.lower()
+            if trailing_lower in {"super fan", "top fan"} or trailing.startswith("󱘫"):
+                i += 1
+                continue
+            if re.fullmatch(r"[\d.,]+\s*[kKmM]?", trailing):
+                i += 1
+                continue
+            if is_ui_residue_comment(trailing):
+                i += 1
+                continue
+            break
+
+    return normalize_comment_records(records)
+
+
+async def scrape_facebook_comments_mobile(url):
+    target_url = to_www_facebook_url(url)
+    all_unique_comments = []
+    seen_global = set()
+
+    for profile in MOBILE_BROWSER_PROFILES:
+        runtime = launch_real_chrome_for_cdp(target_url, profile, mobile_mode=True)
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{runtime['port']}")
+                context, page = await get_facebook_page_and_context(browser, target_url)
+                await page.wait_for_load_state("domcontentloaded")
+                await page.wait_for_timeout(1600)
+                try:
+                    await context.set_extra_http_headers({"Accept-Language": profile.get("locale", "fr-FR")})
+                except Exception:
+                    pass
+
+                await close_facebook_popup_x(page)
+                await try_select_all_comments(page)
+
+                stable_rounds = 0
+                for _ in range(50):
+                    await recover_mobile_post_page(page, target_url)
+                    await close_facebook_popup_x(page)
+                    await wait_for_facebook_loading_to_finish(page)
+
+                    # Periodically try to find and click "view more" style buttons
+                    try:
+                        view_more_labels = ["view more comments", "plus de commentaires", "afficher plus de commentaires", "view previous comments", "voir les commentaires précédents"]
+                        for label in view_more_labels:
+                            btn = page.get_by_text(re.compile(label, re.I)).first
+                            if await btn.count() > 0 and await btn.is_visible():
+                                await btn.click(timeout=1500)
+                                await page.wait_for_timeout(1200)
+                                logger.info(f"Clicked 'view more' button with label: {label}")
+                                break
+                    except Exception:
+                        pass
+
+                    body_text = await page.locator("body").inner_text()
+                    current_batch = extract_comments_from_body_text(body_text)
+                    if len(current_batch) < 6:
+                        dom_comments = await extract_structured_comments_from_page(page)
+                        if len(dom_comments) > len(current_batch):
+                            current_batch = dom_comments
+                    
+                    # Accumulate unique comments globally
+                    new_found = 0
+                    for c in current_batch:
+                        key = (c["user"].lower(), c["text"].lower())
+                        if key not in seen_global:
+                            all_unique_comments.append(c)
+                            seen_global.add(key)
+                            new_found += 1
+                    
+                    if new_found > 0:
+                        stable_rounds = 0
+                        logger.info(f"Found {new_found} new unique comments (Total: {len(all_unique_comments)})")
+                    else:
+                        stable_rounds += 1
+
+                    lowered_body = normalize_scraped_text(body_text).lower()
+                    if any(marker in lowered_body for marker in FACEBOOK_END_MARKERS):
+                        logger.info("Detected end-of-thread markers in Facebook mobile view; stopping scroll loop.")
+                        break
+
+                    viewport_height = profile["viewport"]["height"]
+                    await page.mouse.wheel(0, int(viewport_height * 1.05))
+                    await page.wait_for_timeout(2200)
+                    await wait_for_facebook_loading_to_finish(page)
+
+                    if any(marker in lowered_body for marker in FACEBOOK_GATE_MARKERS):
+                        close_attempted = await close_facebook_popup_x(page)
+                        logger.info(f"detected login gate; close attempted={close_attempted} via label-button")
+                        await recover_mobile_post_page(page, target_url)
+
+                    if stable_rounds >= 10:
+                        break
+
+                await browser.close()
+        finally:
+            cleanup_chrome_runtime(runtime)
+
+    return all_unique_comments
+
+
 async def scrape_and_extract_comments(url):
     logger.info(f"Starting scrape_and_extract_comments for URL: {url}")
 
-    # Ensure playwright binaries are present automatically
-    try:
-        import subprocess
-        subprocess.run(["playwright", "install", "chromium"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        logger.warning(f"Auto playwright install skipped or failed: {e}")
-
-    # Custom JavaScript to handle unpredictable Facebook UI (delayed popups, comment loading)
-    js_interaction = """
-    let attempts = 0;
-    let clickInterval = setInterval(() => {
-        const closeBtn = document.querySelector('div[aria-label="Close"]') || document.querySelector('div[aria-label="Fermer"]') || document.querySelector('div[aria-label="\u0625\u063a\u0644\u0627\u0642"]');
-        if (closeBtn) closeBtn.click();
-
-        const dialogs = document.querySelectorAll('div[role="dialog"]');
-        dialogs.forEach(d => d.remove());
-
-        document.querySelectorAll('[aria-hidden="true"]').forEach(el => el.removeAttribute('aria-hidden'));
-        document.dispatchEvent(new KeyboardEvent('keydown', {'key': 'Escape'}));
-
-        const buttons = Array.from(document.querySelectorAll('div[role="button"]'));
-        const commentBtn = buttons.find(el =>
-            el.textContent.includes('View more comments') ||
-            el.textContent.includes('Afficher plus') ||
-            el.textContent.includes('\u0639\u0631\u0636 \u0627\u0644\u0645\u0632\u064a\u062f')
-        );
-        if (commentBtn) commentBtn.click();
-
-        attempts++;
-        if (attempts > 10) clearInterval(clickInterval);
-    }, 500);
-    """
-
-    logger.info("Starting AsyncWebCrawler...")
-    async with AsyncWebCrawler(headless=False) as crawler:
-        result = await crawler.arun(
-            url=url,
-            magic_mode=False,
-            bypass_cache=True,
-            delay_before_return_html=5.0,
-            js_code=js_interaction,
-            max_scroll_steps=10,
-            scroll_delay=3.0,
-            word_count_threshold=0
-        )
-
-    logger.info(f"Crawler finished. Success: {result.success}")
-    md_len = len(result.markdown) if result.markdown else 0
-    logger.info(f"Raw Markdown Length: {md_len} chars.")
-
-    if md_len < 200:
-        logger.warning(f"Very short markdown! Page may be gated. Preview: {(result.markdown or '')[:200]}")
-        return None
-
-    # --- DIRECT OLLAMA CALL: bypass LLMExtractionStrategy's silent failures ---
-    logger.info("Sending markdown to Ollama (gemma3:4b) for comment extraction...")
-    # Dynamically find where comments start in the markdown.
-    # Facebook always places a "Most relevant" / "Like · Comment · Share" divider before comments.
-    md = result.markdown
-    comment_section_start = -1
-    for marker in ["Most relevant", "Most Relevant", "Top comments", "Like · Comment · Share", "Like\nComment\nShare", "\u0627\u062a\u0631\u0643 \u062a\u0639\u0644\u064a\u0642\u0627\u064b", "\u062a\u0639\u0644\u064a\u0642\u0627\u062a"]:
-        idx = md.find(marker)
-        if idx != -1:
-            comment_section_start = idx
-            logger.info(f"Found comments section at char {idx} using marker: '{marker}'")
-            break
-
-    if comment_section_start == -1:
-        logger.warning("Could not find comment section marker. Sending second half of markdown as fallback.")
-        comment_section_start = len(md) // 2
-
-    page_text = md[comment_section_start:]
-    logger.info(f"Comments section is {len(page_text)} chars. Processing in chunks...")
-
-    CHUNK_SIZE = 3000
-    all_comments = []
-    chunks = [page_text[i:i+CHUNK_SIZE] for i in range(0, len(page_text), CHUNK_SIZE)]
-    logger.info(f"Splitting into {len(chunks)} chunks of ~{CHUNK_SIZE} chars each.")
-
-    for i, chunk in enumerate(chunks):
-        logger.info(f"Calling Ollama on chunk {i+1}/{len(chunks)}...")
-        prompt = (
-            "You are a data extraction assistant. "
-            "From the following text scraped from a Facebook post's comment section, extract ALL user comments. "
-            "Return ONLY a valid JSON array of objects, each with three keys: 'user' (string), 'text' (string, the comment text), and 'timestamp' (string, e.g. '5w', '2d', '1h'. If no timestamp is visible, use 'Unknown'). "
-            "Ignore navigation links, 'Like', 'Reply', and author badges. "
-            "Keep the original Arabic/Darija/French/Emoji text exactly as-is. "
-            "If no comments are found in this chunk, return an empty array []. "
-            "Do not add any explanation before or after the JSON.\n\n"
-            f"--- COMMENTS CHUNK {i+1} ---\n{chunk}"
-        )
+    if "facebook.com" in url or "fb.com" in url:
         try:
-            response = litellm.completion(
-                model="ollama/gemma3:4b",
-                messages=[{"role": "user", "content": prompt}],
-                api_base="http://localhost:11434",
-                num_ctx=2048,
-            )
-            if not response.choices or not response.choices[0].message.content:
-                logger.warning(f"Chunk {i+1}: Ollama returned empty response, skipping.")
-                continue
-            raw_text = response.choices[0].message.content
-            logger.info(f"Chunk {i+1}: Ollama responded with {len(raw_text)} chars.")
-
-            start_idx = raw_text.find('[')
-            end_idx = raw_text.rfind(']') + 1
-            if start_idx == -1 or end_idx == 0:
-                logger.warning(f"Chunk {i+1}: No JSON array found. Raw: {raw_text[:300]}")
-                continue
-            chunk_comments = json.loads(raw_text[start_idx:end_idx])
-            logger.info(f"Chunk {i+1}: Extracted {len(chunk_comments)} comments.")
-            all_comments.extend(chunk_comments)
+            mobile_comments = await scrape_facebook_comments_mobile(url)
+            if mobile_comments:
+                logger.info(f"Facebook extractor winner so far: mobile_real_chrome_cdp ({len(mobile_comments)} comments)")
+                return json.dumps(mobile_comments)
         except Exception as e:
-            logger.error(f"Chunk {i+1}: Ollama call failed: {e}")
-            continue
-
-    logger.info(f"Total comments extracted across all chunks: {len(all_comments)}")
-    if not all_comments:
+            logger.warning(f"Mobile Facebook extraction failed: {e}")
         return None
-    return json.dumps(all_comments)
+
+    return None
 
 
 EMOTION_META = {
@@ -413,11 +1002,17 @@ def run_emotion_analysis(comments_data, tokenizer, model):
         if isinstance(item, dict):
             text = item.get("text", "")
             timestamp = item.get("timestamp", "Unknown")
+            user = item.get("user", "")
         else:
             text = str(item)
             timestamp = "Unknown"
+            user = ""
             
+        text = clean_comment_text(text)
         if not text or not text.strip():
+            continue
+        if looks_like_profile_name_only(text, user=user):
+            logger.info(f"Skipping name-only candidate at position {idx+1}: {text}")
             continue
         emotion = predict_emotion(text, tokenizer, model)
         is_high_priority = emotion in HIGH_PRIORITY_EMOTIONS
@@ -430,29 +1025,54 @@ def run_emotion_analysis(comments_data, tokenizer, model):
         })
     return results
 
+def format_ai_brief_error(error):
+    message = str(error)
+    lowered = message.lower()
+    if "memory layout cannot be allocated" in lowered or "out of memory" in lowered:
+        return "⚠️ Could not generate AI brief: Ollama is running, but the local model ran out of memory. Close other heavy apps, restart Ollama, or use a smaller Ollama model."
+    if "apiconnectionerror" in lowered or "connection refused" in lowered or "failed to connect" in lowered:
+        return "⚠️ Could not generate AI brief: Ollama is not reachable on http://localhost:11434."
+    return f"⚠️ Could not generate AI brief: {message}"
+
 def generate_executive_brief(df):
     try:
-        top_issues = df[df["High Priority"] == "🚨 YES"]["Comment"].tolist()[:10]
-        general = df["Comment"].tolist()[:15]
-        
-        prompt = (
-            "You are an expert Social Media Sentiment Analyst. I have collected comments from Algerian users on a recent post. "
-            "Write a strict 3-sentence Executive Brief summarizing the overall sentiment. "
-            "Mention the main source of frustration or anger (if any) and the general vibe (if people are satisfied). "
-            "Keep it highly professional, short, and to the point.\n\n"
-            f"High Priority Comments (Anger/Frustration): {top_issues}\n"
-            f"General Comments: {general}"
-        )
-        response = litellm.completion(
-            model="ollama/gemma3:4b",
-            messages=[{"role": "user", "content": prompt}],
-            api_base="http://localhost:11434",
-            num_ctx=2048,
-        )
-        return response.choices[0].message.content.strip()
+        top_issues_all = df[df["High Priority"] == "🚨 YES"]["Comment"].tolist()
+        general_all = df["Comment"].tolist()
+        attempts = [
+            {"top_n": 8, "general_n": 12, "num_ctx": 2048},
+            {"top_n": 5, "general_n": 8, "num_ctx": 1024},
+            {"top_n": 3, "general_n": 5, "num_ctx": 768},
+        ]
+        last_error = None
+
+        for attempt in attempts:
+            top_issues = top_issues_all[:attempt["top_n"]]
+            general = general_all[:attempt["general_n"]]
+            prompt = (
+                "You are an expert Social Media Sentiment Analyst. I collected comments from Algerian users on a recent post. "
+                "Write a strict 3-sentence executive brief. Mention the main source of frustration or anger if present, "
+                "the overall sentiment, and one short business takeaway. Keep it concise and professional.\n\n"
+                f"High Priority Comments: {top_issues}\n"
+                f"General Comments: {general}"
+            )
+            try:
+                response = litellm.completion(
+                    model="ollama/gemma3:4b",
+                    messages=[{"role": "user", "content": prompt}],
+                    api_base="http://localhost:11434",
+                    num_ctx=attempt["num_ctx"],
+                )
+                return response.choices[0].message.content.strip()
+            except Exception as error:
+                last_error = error
+                logger.warning(
+                    f"AI brief attempt failed (num_ctx={attempt['num_ctx']}, top_n={attempt['top_n']}, general_n={attempt['general_n']}): {error}"
+                )
+
+        raise last_error
     except Exception as e:
         logger.error(f"Error generating AI Brief: {e}")
-        return "⚠️ Could not generate AI brief. Please ensure Ollama is running."
+        return format_ai_brief_error(e)
 
 
 def render_results(results):
@@ -530,7 +1150,7 @@ def render_results(results):
             height=340,
             hoverlabel=dict(bgcolor="#ffffff", font_color="#000000", font_size=12, font_family="Montserrat")
         )
-        st.plotly_chart(fig_donut, use_container_width=True)
+        st.plotly_chart(fig_donut, width='stretch')
 
     with col2:
         st.markdown('<div class="section-title">Volume</div>', unsafe_allow_html=True)
@@ -554,7 +1174,7 @@ def render_results(results):
             height=340,
             hoverlabel=dict(bgcolor="#ffffff", font_color="#000000", font_size=12, font_family="Montserrat")
         )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, width='stretch')
 
     # ── Comment Cards ──
     st.markdown('<div class="section-title">Feed</div>', unsafe_allow_html=True)
@@ -619,7 +1239,6 @@ def main():
             <ul style='list-style-type:none; padding:0;'>
                 <li>🧠 DziriBERT (Local)</li>
                 <li>🤖 Gemma 3:4b (Local)</li>
-                <li>🕸️ AsyncWebCrawler</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
@@ -655,7 +1274,7 @@ def main():
         if start_analysis and url_input:
             with st.status("Scraping page and analysing sentiments...", expanded=True) as status:
                 try:
-                    st.write("Launching browser and bypassing bot protection...")
+                    st.write("Launching a full browser-driven scraper and extracting comments from the live page DOM...")
                     extracted_json_str = asyncio.run(scrape_and_extract_comments(url_input))
                     if not extracted_json_str:
                         status.update(label="No content extracted.", state="error")
@@ -668,7 +1287,14 @@ def main():
                         st.warning("Page was found but no comments were identified.")
                         return
                     st.write(f"Running DziriBERT on {len(comments_list)} comments...")
-                    data_payload = [{"text": item.get("text", str(item)), "timestamp": item.get("timestamp", "Unknown")} for item in comments_list]
+                    data_payload = [
+                        {
+                            "text": item.get("text", str(item)),
+                            "timestamp": item.get("timestamp", "Unknown"),
+                            "user": item.get("user", ""),
+                        }
+                        for item in comments_list
+                    ]
                     results = run_emotion_analysis(data_payload, tokenizer, model)
                     st.session_state['results'] = results
                     status.update(label=f"Done! Analysed {len(results)} comments.", state="complete", expanded=False)
@@ -711,7 +1337,7 @@ def main():
                         col_name = st.selectbox("Which column contains the comments?", df_csv.columns.tolist())
                     if col_name:
                         st.info(f"Using column: **{col_name}**")
-                        st.dataframe(df_csv[[col_name]].head(8), use_container_width=True)
+                        st.dataframe(df_csv[[col_name]].head(8), width='stretch')
                         
                         date_col = None
                         for c in ["date", "time", "timestamp", "Date", "Time", "Timestamp", "تاريخ"]:

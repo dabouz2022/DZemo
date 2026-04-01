@@ -10,3 +10,5 @@ wordcloud
 matplotlib
 arabic_reshaper
 python-bidi
+selenium
+pyvirtualdisplay
