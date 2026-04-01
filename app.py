@@ -795,146 +795,142 @@ async def scrape_facebook_comments_mobile(url):
     return all_unique_comments
 
 
-async def scrape_facebook_comments_desktop(url):
+async def scrape_facebook_comments_better_way(url):
     """
-    Overhauled 'Comet Deep Diver' scraper for Desktop Facebook.
-    Features: All Comments filter selection, Recursive thread expansion, and Resource optimization.
+    A more robust, desktop-based scraper that handles login modals and 'All Comments' filtering.
     """
-    logger.info(f"Launching Comet Deep Diver (Desktop) for: {url}")
+    logger.info(f"Using 'Better Way' scraper for: {url}")
+    target_url = to_www_facebook_url(url)
     all_unique_comments = []
-    seen_ids = set()
+    seen_global = set()
 
-    # Block heavy resources to save RAM on 2GB server
-    async def block_aggressively(route):
-        if route.request.resource_type in ["image", "media", "font"]:
-            await route.abort()
-        else:
-            await route.continue_()
-
+    # Reuse the runtime detection and virtual display logic
+    runtime = ensure_runtime_dir(CHROME_RUNTIME_DIR)
+    maybe_start_virtual_display(1280, 800)
+    
     try:
-        runtime = get_chrome_runtime()
         async with async_playwright() as p:
-            browser = await p.chromium.launch_managed(runtime, headless=True, args=[
-                "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-                "--disable-gpu", "--disable-software-rasterizer", "--disable-zygote"
-            ])
+            # Launch standard Chromium with stealth-like arguments
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled", "--disable-infobars"
+                ]
+            )
             context = await browser.new_context(
-                viewport={'width': 1280, 'height': 2000},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                viewport={'width': 1280, 'height': 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                locale="fr-FR"
             )
             page = await context.new_page()
-            await page.route("**/*", block_aggressively)
-
-            # 1. Load the page
-            await page.goto(url, wait_until="domcontentloaded", timeout=65000)
-            await asyncio.sleep(5)
-
-            # 2. Close any initial login overlays
-            close_selectors = [
-                '[aria-label="Fermer"]', '[aria-label="Close"]', 
-                '[role="dialog"] i[class*="x"]', 'div[role="button"] i'
-            ]
-            for selector in close_selectors:
-                try:
-                    btn = await page.query_selector(selector)
-                    if btn and await btn.is_visible():
-                        await btn.click()
-                        logger.info(f"Closed login/cookie overlay using {selector}")
-                        await asyncio.sleep(1)
-                except: pass
-
-            # 3. Select 'All Comments' (Most Critical)
-            # This bypasses 'Most Relevant' which hides 80% of comments.
-            try:
-                # Find the filter dropdown
-                filter_btn = await page.get_by_role("button", name=re.compile(r"pertinent|Commentaires|Relevant|Comments", re.I)).first
-                if filter_btn:
-                    await filter_btn.click()
-                    await asyncio.sleep(2)
-                    # Select 'All Comments' or 'Tous les commentaires'
-                    all_comments_option = await page.get_by_role("menuitem", name=re.compile(r"Tous|All", re.I)).last
-                    if all_comments_option:
-                        await all_comments_option.click()
-                        logger.info("Successfully selected 'All Comments' filter.")
-                        await asyncio.sleep(3)
-            except Exception as e:
-                logger.warning(f"Could not force 'All Comments' filter: {e}")
-
-            # 4. Recursive Expansion Script
-            logger.info("Starting recursive thread expansion...")
             
-            expansion_script = """
-            async () => {
-                const sleep = (ms) => new Promise(res => setTimeout(res, ms));
-                let totalClicks = 0;
-                let stableCount = 0;
-                
-                for (let i = 0; i < 40; i++) {
-                    const buttons = [
-                        ...document.querySelectorAll('div[role="button"]'),
-                        ...document.querySelectorAll('span')
-                    ].filter(el => {
-                        const text = el.innerText || "";
-                        return /Voir plus de commentaires|Afficher les réponses|View more comments|Voir les \\d+ réponses|View \\d+ replies|replied/i.test(text);
-                    });
-
-                    if (buttons.length === 0) {
-                        stableCount++;
-                        if (stableCount > 3) break;
-                    } else {
-                        stableCount = 0;
-                        for (let btn of buttons) {
-                            try {
-                                btn.click();
-                                totalClicks++;
-                                if (totalClicks % 10 === 0) await sleep(500); 
-                            } catch(e) {}
-                        }
-                    }
-                    window.scrollBy(0, 500);
-                    await sleep(1500);
-                }
-                return totalClicks;
-            }
-            """
-            clicks = await page.evaluate(expansion_script)
-            logger.info(f"Expansion complete. Total interaction clicks: {clicks}")
-
-            # 5. Extraction
-            extracted = await page.evaluate("""
+            logger.info(f"Navigating to Desktop URL: {target_url}")
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(3000)
+            
+            # 1. Bypass Login Modal / Overlay
+            await page.evaluate("""
                 () => {
-                    const found = [];
-                    const items = document.querySelectorAll('div[role="article"], div[data-testid="post_comment"]');
-                    items.forEach(el => {
-                        const userEl = el.querySelector('a[role="link"], span[dir="auto"] strong');
-                        const textEl = el.querySelector('div[dir="auto"]');
-                        if (textEl && userEl) {
-                            found.push({
-                                user: userEl.innerText.trim(),
-                                text: textEl.innerText.trim(),
-                                timestamp: "Just now"
-                            });
-                        }
+                    const selectors = ['div[role="dialog"]', 'div#login_popup', 'div#header_block', 'div.x1n2onr6.x1vjfegm'];
+                    selectors.forEach(s => {
+                        const elements = document.querySelectorAll(s);
+                        elements.forEach(el => {
+                            if (el && (el.innerText.toLowerCase().includes('se connecter') || el.innerText.toLowerCase().includes('log in'))) {
+                                el.remove();
+                            }
+                        });
                     });
-                    return found;
+                    document.body.style.overflow = 'auto'; // Re-enable scrolling
                 }
             """)
             
-            # Simple global deduplication
-            for c in extracted:
-                cid = f"{c.get('user', '')}:{c.get('text', '')}"
-                if cid not in seen_ids:
-                    all_unique_comments.append(c)
-                    seen_ids.add(cid)
+            # Try to click explicit 'X' if visible
+            for x_selector in ['div[aria-label="Fermer"]', 'div[aria-label="Close"]', 'div[role="button"]:has-text("X")']:
+                try:
+                    btn = page.locator(x_selector).first
+                    if await btn.count() > 0 and await btn.is_visible():
+                        await btn.click(timeout=2000)
+                        logger.info(f"Closed login modal via {x_selector}")
+                except: pass
 
+            # 2. Select "All Comments" Filter
+            filter_labels = ["Plus pertinents", "Most relevant", "Commentaires"]
+            for label in filter_labels:
+                try:
+                    btn = page.get_by_text(label).first
+                    if await btn.count() > 0 and await btn.is_visible():
+                        await btn.click()
+                        await page.wait_for_timeout(1500)
+                        # Select "All"
+                        all_options = [
+                            "Toutes les réponses", "All comments", "Tous les commentaires",
+                            "Les plus récents", "Newest"
+                        ]
+                        for al in all_options:
+                            all_btn = page.get_by_text(al).first
+                            if await all_btn.count() > 0:
+                                await all_btn.click()
+                                logger.info(f"Selected '{al}' filter.")
+                                await page.wait_for_timeout(2500)
+                                break
+                        break
+                except: pass
+
+            # 3. Recursive Expansion & Extraction
+            stable_rounds = 0
+            for scroll_idx in range(120):
+                # Click "View more" buttons recursively
+                more_labels = [
+                    "Plus de commentaires", "View more comments", "réponses", "replies", 
+                    "voir plus", "view all", "afficher les"
+                ]
+                for ml in more_labels:
+                    try:
+                        btns = page.get_by_text(re.compile(ml, re.I))
+                        count = await btns.count()
+                        if count > 0:
+                            for i in range(min(count, 8)): # Click up to 8 buttons per round
+                                b = btns.nth(i)
+                                if await b.is_visible():
+                                    await b.click(timeout=1200)
+                                    await page.wait_for_timeout(800)
+                    except: pass
+                
+                # Extract using internal DOM heuristic
+                batch = await extract_structured_comments_from_page(page)
+                
+                # Also fallback to body text if DOM fails
+                body_text = await page.locator("body").inner_text()
+                body_batch = extract_comments_from_body_text(body_text)
+                
+                new_found = 0
+                for c in (batch + body_batch):
+                    key = (c["user"].lower(), c["text"].lower())
+                    if key not in seen_global:
+                        all_unique_comments.append(c)
+                        seen_global.add(key)
+                        new_found += 1
+                
+                if new_found > 0:
+                    stable_rounds = 0
+                    logger.info(f"Better Way: Found {new_found} new (Total: {len(all_unique_comments)})")
+                else:
+                    stable_rounds += 1
+                
+                # Scroll the page or the active dialog if one exists
+                await page.evaluate("window.scrollBy(0, 1000)")
+                await page.wait_for_timeout(2000)
+                
+                if stable_rounds >= 35 and len(all_unique_comments) > 15:
+                    break
+            
             await browser.close()
     except Exception as e:
-        logger.error(f"Comet Deep Diver failed: {e}")
+        logger.error(f"Better Way Error: {e}")
     finally:
-        if runtime:
-            cleanup_chrome_runtime(runtime)
-
-    logger.info(f"Comet Deep Diver finished with {len(all_unique_comments)} unique comments.")
+        cleanup_chrome_runtime(runtime)
+        
     return all_unique_comments
 
 
@@ -942,26 +938,24 @@ async def scrape_and_extract_comments(url):
     logger.info(f"Starting scrape_and_extract_comments for URL: {url}")
 
     if "facebook.com" in url or "fb.com" in url:
-        # Try Desktop First (The New Better Way)
         try:
-            desktop_comments = await scrape_facebook_comments_desktop(url)
-            if len(desktop_comments) > 5:
-                logger.info(f"Desktop extractor won! ({len(desktop_comments)} comments)")
-                return json.dumps(desktop_comments)
+            # 1. Primary: Better Way (Desktop Stealth)
+            comments = await scrape_facebook_comments_better_way(url)
+            
+            # 2. Fallback: Mobile
+            if not comments or len(comments) < 5:
+                logger.info("Better Way yielded too few; attempting Mobile fallback...")
+                mobile_comments = await scrape_facebook_comments_mobile(url)
+                if mobile_comments and len(mobile_comments) > len(comments or []):
+                    comments = mobile_comments
+            
+            if comments:
+                logger.info(f"Facebook extraction complete: {len(comments)} comments total.")
+                return json.dumps(comments)
+            return None
         except Exception as e:
-            logger.warning(f"Desktop extraction failed or low yield: {e}")
-
-        # Fallback to Mobile
-        try:
-            mobile_comments = await scrape_facebook_comments_mobile(url)
-            if mobile_comments:
-                logger.info(f"Fallback to mobile successful ({len(mobile_comments)} comments)")
-                return json.dumps(mobile_comments)
-        except Exception as e:
-            logger.warning(f"Mobile fallback failed as well: {e}")
-        
-        return None
-
+            logger.error(f"Scrape execution error: {e}")
+            return None
     return None
 
 
