@@ -1346,27 +1346,6 @@ def render_results(results):
                 </div>
             """, unsafe_allow_html=True)
 
-    # ── Sentiment Trend ──────────────────────────────────────────────────
-    st.markdown('<div class="section-title">Sentiment Evolution</div>', unsafe_allow_html=True)
-    try:
-        # Simple date parsing attempt for trend
-        df['dt'] = pd.to_datetime(df['Timestamp'], errors='coerce')
-        df_trend = df.dropna(subset=['dt']).sort_values('dt')
-        if not df_trend.empty:
-            trend_data = df_trend.groupby([df_trend['dt'].dt.date, 'Emotion']).size().reset_index(name='Count')
-            fig_trend = px.area(trend_data, x='dt', y='Count', color='Emotion',
-                                color_discrete_map={e: EMOTION_META.get(e, {}).get('color', '#6366f1') for e in emotion_counts['Emotion']})
-            fig_trend.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                font_color='#888', height=280, margin=dict(t=10, b=10, l=10, r=10),
-                xaxis_title="", yaxis_title=""
-            )
-            st.plotly_chart(fig_trend, width='stretch')
-        else:
-            st.info("No valid timestamps found for trend analysis.")
-    except Exception as te:
-        logger.debug(f"Trend chart skipped: {te}")
-
     # ── Charts ─────────────────────────────────────────────────────────────
     emotion_counts = df['Emotion'].value_counts().reset_index()
     emotion_counts.columns = ['Emotion', 'Count']
@@ -1420,38 +1399,27 @@ def render_results(results):
         )
         st.plotly_chart(fig_bar, use_container_width=True)
 
-    # ── Keyword Highlights ─────────────────────────────────────────────────
-    st.markdown('<div class="section-title">Keyword Highlights</div>', unsafe_allow_html=True)
-    keywords = extract_top_keywords(df["Comment"].tolist())
-    if keywords:
-        fig_keys = px.bar(
-            x=[k[0] for k in keywords], y=[k[1] for k in keywords],
-            labels={'x': 'Word', 'y': 'Frequency'}
-        )
-        fig_keys.update_traces(marker_color='#ffffff', opacity=0.8)
-        fig_keys.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-            font_color='#888', font_family='Inter', height=250,
-            xaxis_title="", yaxis_title="", margin=dict(t=10, b=10, l=10, r=10)
-        )
-        st.plotly_chart(fig_keys, use_container_width=True)
-
     # ── Premium Comment List (Cards) ───────────────────────────────────────
     st.markdown('<div class="section-title">Analysis Stream</div>', unsafe_allow_html=True)
     for _, row in df.iterrows():
         meta = EMOTION_META.get(row['Emotion'], {'emoji': '💬', 'color': '#6366f1'})
         prio_style = "border-left: 4px solid #ef4444; background: rgba(239, 68, 68, 0.05);" if row["High Priority"] == "🚨 YES" else "border-left: 2px solid #333;"
         
+        # Defensive field extraction
+        user_name = row.get('User') if pd.notnull(row.get('User')) else "Anonymous"
+        timestamp = row.get('Timestamp') if pd.notnull(row.get('Timestamp')) else "Unknown"
+        comment_text = row.get('Comment') if pd.notnull(row.get('Comment')) else ""
+        
         st.markdown(f"""
         <div class="comment-card" style="{prio_style} margin-bottom: 12px; padding: 20px; border-radius: 8px; background: rgba(255,255,255,0.02);">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
                 <div style="display:flex; align-items:center;">
                     <div style="width:32px; height:32px; border-radius:50%; background:{meta['color']}; display:flex; align-items:center; justify-content:center; margin-right:12px; font-weight:bold; color:white;">
-                        {row['User'][0].upper() if row['User'] else '?'}
+                        {str(user_name)[0].upper() if user_name else '?'}
                     </div>
                     <div>
-                        <div style="font-weight:700; color:#fff; font-size:0.9rem;">{row['User'] or 'Anonymous'}</div>
-                        <div style="font-size:0.75rem; color:#666;">{row['Timestamp']}</div>
+                        <div style="font-weight:700; color:#fff; font-size:0.9rem;">{user_name}</div>
+                        <div style="font-size:0.75rem; color:#666;">{timestamp}</div>
                     </div>
                 </div>
                 <div style="display:flex; gap:8px;">
@@ -1462,7 +1430,7 @@ def render_results(results):
                 </div>
             </div>
             <div style="color:#e5e7eb; font-size:0.95rem; line-height:1.6; margin-left:44px;">
-                {row['Comment']}
+                {comment_text}
             </div>
         </div>
         """, unsafe_allow_html=True)
