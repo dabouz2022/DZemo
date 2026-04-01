@@ -1370,7 +1370,7 @@ def render_results(results):
     # ── Charts ─────────────────────────────────────────────────────────────
     emotion_counts = df['Emotion'].value_counts().reset_index()
     emotion_counts.columns = ['Emotion', 'Count']
-    colors = [EMOTION_META.get(e, {}).get('color', '#6366f1') for e in emotion_counts['Emotion']]
+    chart_colors = {e: EMOTION_META.get(e, {}).get('color', '#6366f1') for e in emotion_counts['Emotion']}
 
     col1, col2 = st.columns([1, 1])
 
@@ -1379,7 +1379,7 @@ def render_results(results):
         fig_donut = px.pie(
             emotion_counts, names='Emotion', values='Count',
             hole=0.65, color='Emotion',
-            color_discrete_map={e: EMOTION_META.get(e, {}).get('color', '#6366f1') for e in emotion_counts['Emotion']}
+            color_discrete_map=chart_colors
         )
         fig_donut.update_traces(
             textposition='inside', 
@@ -1391,15 +1391,34 @@ def render_results(results):
         fig_donut.update_layout(
             paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
             font_color='#ffffff', 
-            font_family='Montserrat',
+            font_family='Inter',
             showlegend=False,
             margin=dict(t=10, b=10, l=10, r=10),
-            height=340,
-            hoverlabel=dict(bgcolor="#ffffff", font_color="#000000", font_size=12, font_family="Montserrat")
+            height=340
         )
-        st.plotly_chart(fig_donut, width='stretch')
+        st.plotly_chart(fig_donut, use_container_width=True)
 
-        st.plotly_chart(fig_bar, width='stretch')
+    with col2:
+        st.markdown('<div class="section-title">Volume</div>', unsafe_allow_html=True)
+        fig_bar = px.bar(
+            emotion_counts, x='Count', y='Emotion', orientation='h',
+            color='Emotion',
+            color_discrete_map=chart_colors
+        )
+        fig_bar.update_traces(
+            marker_line_width=0, opacity=1.0,
+            hovertemplate="<b>%{y}</b>: %{x}<extra></extra>"
+        )
+        fig_bar.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            font_color='#aaaaaa', font_family='Inter',
+            showlegend=False,
+            yaxis=dict(autorange="reversed", title="", showgrid=False),
+            xaxis=dict(title="", showgrid=True, gridcolor='#333333'),
+            margin=dict(t=10, b=10, l=10, r=20),
+            height=340
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
 
     # ── Keyword Highlights ─────────────────────────────────────────────────
     st.markdown('<div class="section-title">Keyword Highlights</div>', unsafe_allow_html=True)
@@ -1415,7 +1434,7 @@ def render_results(results):
             font_color='#888', font_family='Inter', height=250,
             xaxis_title="", yaxis_title="", margin=dict(t=10, b=10, l=10, r=10)
         )
-        st.plotly_chart(fig_keys, width='stretch')
+        st.plotly_chart(fig_keys, use_container_width=True)
 
     # ── Premium Comment List (Cards) ───────────────────────────────────────
     st.markdown('<div class="section-title">Analysis Stream</div>', unsafe_allow_html=True)
