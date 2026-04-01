@@ -1403,33 +1403,24 @@ def render_results(results):
     st.markdown('<div class="section-title">Analysis Stream</div>', unsafe_allow_html=True)
     for _, row in df.iterrows():
         meta = EMOTION_META.get(row['Emotion'], {'emoji': '💬', 'color': '#6366f1'})
-        prio_style = "border-left: 4px solid #ef4444; background: rgba(239, 68, 68, 0.05);" if row["High Priority"] == "🚨 YES" else "border-left: 2px solid #333;"
+        prio_style = "border-left: 4px solid #ef4444;" if row["High Priority"] == "🚨 YES" else "border-left: 2px solid #333;"
         
         # Defensive field extraction
-        user_name = row.get('User') if pd.notnull(row.get('User')) else "Anonymous"
         timestamp = row.get('Timestamp') if pd.notnull(row.get('Timestamp')) else "Unknown"
         comment_text = row.get('Comment') if pd.notnull(row.get('Comment')) else ""
         
         st.markdown(f"""
-        <div class="comment-card" style="{prio_style} margin-bottom: 12px; padding: 20px; border-radius: 8px; background: rgba(255,255,255,0.02);">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <div style="display:flex; align-items:center;">
-                    <div style="width:32px; height:32px; border-radius:50%; background:{meta['color']}; display:flex; align-items:center; justify-content:center; margin-right:12px; font-weight:bold; color:white;">
-                        {str(user_name)[0].upper() if user_name else '?'}
-                    </div>
-                    <div>
-                        <div style="font-weight:700; color:#fff; font-size:0.9rem;">{user_name}</div>
-                        <div style="font-size:0.75rem; color:#666;">{timestamp}</div>
-                    </div>
-                </div>
+        <div class="comment-card" style="{prio_style} margin-bottom: 16px; padding: 20px; border-radius: 4px; background: rgba(255,255,255,0.03); border-right: 1px solid rgba(255,255,255,0.05); border-top: 1px solid rgba(255,255,255,0.05); border-bottom: 1px solid rgba(255,255,255,0.05);">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
+                <div style="font-size:0.75rem; color:#666; font-family:'Inter'; letter-spacing:0.05em;">{timestamp}</div>
                 <div style="display:flex; gap:8px;">
-                    <span style="background:{meta['color']}22; color:{meta['color']}; padding:4px 10px; border-radius:4px; font-size:0.7rem; font-weight:700; border:1px solid {meta['color']}44;">
-                        {meta['emoji']} {row['Emotion'].upper()}
+                    <span style="background:{meta['color']}22; color:{meta['color']}; padding:4px 10px; border-radius:4px; font-size:0.7rem; font-weight:700; border:1px solid {meta['color']}44; text-transform:uppercase;">
+                        {meta['emoji']} {row['Emotion']}
                     </span>
-                    {"<span style='background:#ef444422; color:#ef4444; padding:4px 10px; border-radius:4px; font-size:0.7rem; font-weight:700; border:1px solid #ef444444;'>🚨 HIGH PRIORITY</span>" if row["High Priority"] == "🚨 YES" else ""}
+                    {"<span style='background:#ef444422; color:#ef4444; padding:4px 10px; border-radius:4px; font-size:0.7rem; font-weight:700; border:1px solid #ef444444;'>🚨 PRIORITY</span>" if row["High Priority"] == "🚨 YES" else ""}
                 </div>
             </div>
-            <div style="color:#e5e7eb; font-size:0.95rem; line-height:1.6; margin-left:44px;">
+            <div style="color:#ffffff; font-size:1.05rem; line-height:1.6; direction:auto;">
                 {comment_text}
             </div>
         </div>
