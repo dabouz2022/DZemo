@@ -708,8 +708,8 @@ async def scrape_facebook_comments_mobile(url):
                 all_unique_comments = []
                 seen_global = set()
                 stable_rounds = 0
-                max_stable_threshold = 25
-                for _ in range(90):
+                max_stable_threshold = 40
+                for _ in range(150):
                     await recover_mobile_post_page(page, target_url)
                     await close_facebook_popup_x(page)
                     await wait_for_facebook_loading_to_finish(page)
@@ -764,8 +764,14 @@ async def scrape_facebook_comments_mobile(url):
                         break
 
                     viewport_height = profile["viewport"]["height"]
-                    await page.mouse.wheel(0, int(viewport_height * 1.05))
-                    await page.wait_for_timeout(2200)
+                    # Perform multiple small scrolls to trigger lazy loading better
+                    for _ in range(2):
+                        await page.mouse.wheel(0, int(viewport_height * 0.8))
+                        await page.wait_for_timeout(800)
+                    
+                    # Force a JS scroll as well
+                    await page.evaluate("window.scrollBy(0, 1000)")
+                    await page.wait_for_timeout(1500)
                     await wait_for_facebook_loading_to_finish(page)
 
                     if any(marker in lowered_body for marker in FACEBOOK_GATE_MARKERS):
@@ -773,9 +779,14 @@ async def scrape_facebook_comments_mobile(url):
                         logger.info(f"detected login gate; close attempted={close_attempted} via label-button")
                         await recover_mobile_post_page(page, target_url)
 
+                    # Only stop if we've been stable for a long time AND we have at least some comments
+                    # or if we've been stable for a VERY long time and have nothing.
                     if stable_rounds >= max_stable_threshold:
-                        logger.info(f"Stabilized for {max_stable_threshold} rounds; stopping early.")
-                        break
+                        if len(all_unique_comments) > 25 or stable_rounds >= 60:
+                            logger.info(f"Stabilized for {stable_rounds} rounds; stopping loop.")
+                            break
+                        else:
+                            logger.info(f"Stable for {stable_rounds} rounds but only have {len(all_unique_comments)} comments; continuing search...")
 
                 await browser.close()
         finally:
