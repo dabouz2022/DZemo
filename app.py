@@ -1162,6 +1162,47 @@ html, body, .stApp, .stMarkdown, .stText, p, h1, h2, h3, h4, h5, h6, li, label, 
     padding-bottom: 0.75rem;
     border-bottom: 1px solid var(--border-color);
 }
+/* Premium Comment Cards */
+.comment-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 4px;
+    padding: 20px;
+    margin-bottom: 16px;
+    transition: background 0.2s;
+}
+.comment-card:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+.comment-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 12px;
+}
+.comment-time {
+    font-size: 0.75rem;
+    color: #666;
+    font-family: var(--primary-font);
+    letter-spacing: 0.05em;
+}
+.comment-badges {
+    display: flex;
+    gap: 8px;
+}
+.status-badge {
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+.comment-body {
+    color: #ffffff;
+    font-size: 1.05rem;
+    line-height: 1.6;
+    direction: auto;
+}
 </style>
 """
 
@@ -1403,28 +1444,23 @@ def render_results(results):
     st.markdown('<div class="section-title">Analysis Stream</div>', unsafe_allow_html=True)
     for _, row in df.iterrows():
         meta = EMOTION_META.get(row['Emotion'], {'emoji': '💬', 'color': '#6366f1'})
-        prio_style = "border-left: 4px solid #ef4444;" if row["High Priority"] == "🚨 YES" else "border-left: 2px solid #333;"
+        border_style = "border-left: 4px solid #ef4444;" if row["High Priority"] == "🚨 YES" else "border-left: 2px solid #333;"
         
-        # Defensive field extraction
-        timestamp = row.get('Timestamp') if pd.notnull(row.get('Timestamp')) else "Unknown"
-        comment_text = row.get('Comment') if pd.notnull(row.get('Comment')) else ""
+        timestamp = str(row.get('Timestamp', 'Unknown'))
+        comment_text = html_lib.escape(str(row.get('Comment', '')))
         
-        st.markdown(f"""
-        <div class="comment-card" style="{prio_style} margin-bottom: 16px; padding: 20px; border-radius: 4px; background: rgba(255,255,255,0.03); border-right: 1px solid rgba(255,255,255,0.05); border-top: 1px solid rgba(255,255,255,0.05); border-bottom: 1px solid rgba(255,255,255,0.05);">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
-                <div style="font-size:0.75rem; color:#666; font-family:'Inter'; letter-spacing:0.05em;">{timestamp}</div>
-                <div style="display:flex; gap:8px;">
-                    <span style="background:{meta['color']}22; color:{meta['color']}; padding:4px 10px; border-radius:4px; font-size:0.7rem; font-weight:700; border:1px solid {meta['color']}44; text-transform:uppercase;">
-                        {meta['emoji']} {row['Emotion']}
-                    </span>
-                    {"<span style='background:#ef444422; color:#ef4444; padding:4px 10px; border-radius:4px; font-size:0.7rem; font-weight:700; border:1px solid #ef444444;'>🚨 PRIORITY</span>" if row["High Priority"] == "🚨 YES" else ""}
-                </div>
-            </div>
-            <div style="color:#ffffff; font-size:1.05rem; line-height:1.6; direction:auto;">
-                {comment_text}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        # Build the card HTML as a single clean string to prevent MD interference
+        card_html = f"""<div class="comment-card" style="{border_style}">
+<div class="comment-header">
+<div class="comment-time">{timestamp}</div>
+<div class="comment-badges">
+<span class="status-badge" style="background:{meta['color']}22; color:{meta['color']}; border:1px solid {meta['color']}44;">{meta['emoji']} {row['Emotion']}</span>
+{"<span class='status-badge' style='background:#ef444422; color:#ef4444; border:1px solid #ef444444;'>🚨 PRIORITY</span>" if row["High Priority"] == "🚨 YES" else ""}
+</div>
+</div>
+<div class="comment-body">{comment_text}</div>
+</div>"""
+        st.markdown(card_html, unsafe_allow_html=True)
 
     # ── Download ───────────────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
