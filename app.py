@@ -795,17 +795,171 @@ async def scrape_facebook_comments_mobile(url):
     return all_unique_comments
 
 
+async def scrape_facebook_comments_desktop(url):
+    """
+    Overhauled 'Comet Deep Diver' scraper for Desktop Facebook.
+    Features: All Comments filter selection, Recursive thread expansion, and Resource optimization.
+    """
+    logger.info(f"Launching Comet Deep Diver (Desktop) for: {url}")
+    all_unique_comments = []
+    seen_ids = set()
+
+    # Block heavy resources to save RAM on 2GB server
+    async def block_aggressively(route):
+        if route.request.resource_type in ["image", "media", "font"]:
+            await route.abort()
+        else:
+            await route.continue_()
+
+    try:
+        runtime = get_chrome_runtime()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch_managed(runtime, headless=True, args=[
+                "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+                "--disable-gpu", "--disable-software-rasterizer", "--disable-zygote"
+            ])
+            context = await browser.new_context(
+                viewport={'width': 1280, 'height': 2000},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
+            page = await context.new_page()
+            await page.route("**/*", block_aggressively)
+
+            # 1. Load the page
+            await page.goto(url, wait_until="domcontentloaded", timeout=65000)
+            await asyncio.sleep(5)
+
+            # 2. Close any initial login overlays
+            close_selectors = [
+                '[aria-label="Fermer"]', '[aria-label="Close"]', 
+                '[role="dialog"] i[class*="x"]', 'div[role="button"] i'
+            ]
+            for selector in close_selectors:
+                try:
+                    btn = await page.query_selector(selector)
+                    if btn and await btn.is_visible():
+                        await btn.click()
+                        logger.info(f"Closed login/cookie overlay using {selector}")
+                        await asyncio.sleep(1)
+                except: pass
+
+            # 3. Select 'All Comments' (Most Critical)
+            # This bypasses 'Most Relevant' which hides 80% of comments.
+            try:
+                # Find the filter dropdown
+                filter_btn = await page.get_by_role("button", name=re.compile(r"pertinent|Commentaires|Relevant|Comments", re.I)).first
+                if filter_btn:
+                    await filter_btn.click()
+                    await asyncio.sleep(2)
+                    # Select 'All Comments' or 'Tous les commentaires'
+                    all_comments_option = await page.get_by_role("menuitem", name=re.compile(r"Tous|All", re.I)).last
+                    if all_comments_option:
+                        await all_comments_option.click()
+                        logger.info("Successfully selected 'All Comments' filter.")
+                        await asyncio.sleep(3)
+            except Exception as e:
+                logger.warning(f"Could not force 'All Comments' filter: {e}")
+
+            # 4. Recursive Expansion Script
+            logger.info("Starting recursive thread expansion...")
+            
+            expansion_script = """
+            async () => {
+                const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+                let totalClicks = 0;
+                let stableCount = 0;
+                
+                for (let i = 0; i < 40; i++) {
+                    const buttons = [
+                        ...document.querySelectorAll('div[role="button"]'),
+                        ...document.querySelectorAll('span')
+                    ].filter(el => {
+                        const text = el.innerText || "";
+                        return /Voir plus de commentaires|Afficher les réponses|View more comments|Voir les \\d+ réponses|View \\d+ replies|replied/i.test(text);
+                    });
+
+                    if (buttons.length === 0) {
+                        stableCount++;
+                        if (stableCount > 3) break;
+                    } else {
+                        stableCount = 0;
+                        for (let btn of buttons) {
+                            try {
+                                btn.click();
+                                totalClicks++;
+                                if (totalClicks % 10 === 0) await sleep(500); 
+                            } catch(e) {}
+                        }
+                    }
+                    window.scrollBy(0, 500);
+                    await sleep(1500);
+                }
+                return totalClicks;
+            }
+            """
+            clicks = await page.evaluate(expansion_script)
+            logger.info(f"Expansion complete. Total interaction clicks: {clicks}")
+
+            # 5. Extraction
+            extracted = await page.evaluate("""
+                () => {
+                    const found = [];
+                    const items = document.querySelectorAll('div[role="article"], div[data-testid="post_comment"]');
+                    items.forEach(el => {
+                        const userEl = el.querySelector('a[role="link"], span[dir="auto"] strong');
+                        const textEl = el.querySelector('div[dir="auto"]');
+                        if (textEl && userEl) {
+                            found.push({
+                                user: userEl.innerText.trim(),
+                                text: textEl.innerText.trim(),
+                                timestamp: "Just now"
+                            });
+                        }
+                    });
+                    return found;
+                }
+            """)
+            
+            # Simple global deduplication
+            for c in extracted:
+                cid = f"{c.get('user', '')}:{c.get('text', '')}"
+                if cid not in seen_ids:
+                    all_unique_comments.append(c)
+                    seen_ids.add(cid)
+
+            await browser.close()
+    except Exception as e:
+        logger.error(f"Comet Deep Diver failed: {e}")
+    finally:
+        if runtime:
+            cleanup_chrome_runtime(runtime)
+
+    logger.info(f"Comet Deep Diver finished with {len(all_unique_comments)} unique comments.")
+    return all_unique_comments
+
+
 async def scrape_and_extract_comments(url):
     logger.info(f"Starting scrape_and_extract_comments for URL: {url}")
 
     if "facebook.com" in url or "fb.com" in url:
+        # Try Desktop First (The New Better Way)
+        try:
+            desktop_comments = await scrape_facebook_comments_desktop(url)
+            if len(desktop_comments) > 5:
+                logger.info(f"Desktop extractor won! ({len(desktop_comments)} comments)")
+                return json.dumps(desktop_comments)
+        except Exception as e:
+            logger.warning(f"Desktop extraction failed or low yield: {e}")
+
+        # Fallback to Mobile
         try:
             mobile_comments = await scrape_facebook_comments_mobile(url)
             if mobile_comments:
-                logger.info(f"Facebook extractor winner so far: mobile_real_chrome_cdp ({len(mobile_comments)} comments)")
+                logger.info(f"Fallback to mobile successful ({len(mobile_comments)} comments)")
                 return json.dumps(mobile_comments)
         except Exception as e:
-            logger.warning(f"Mobile Facebook extraction failed: {e}")
+            logger.warning(f"Mobile fallback failed as well: {e}")
+        
         return None
 
     return None
