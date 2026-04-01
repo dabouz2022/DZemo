@@ -799,114 +799,74 @@ async def scrape_facebook_comments_mobile(url):
 
 async def scrape_facebook_comments_better_way(url):
     """
-    A more robust, desktop-based scraper that handles login modals and 'All Comments' filtering.
+    A high-yield mobile-based scraper that uses Google Referer to bypass walls 
+    and handles deep comment expansion via recursive button clicking.
     """
-    logger.info(f"Using 'Better Way' scraper for: {url}")
-    target_url = to_www_facebook_url(url)
+    logger.info(f"Using High-Yield 'Better Way' scraper for: {url}")
+    target_url = to_m_facebook_url(url)
     all_unique_comments = []
     seen_global = set()
 
-    # Reuse the runtime detection and virtual display logic
     runtime = {"display": maybe_start_virtual_display(1280, 800)}
     
     try:
         async with async_playwright() as p:
-            # Launch standard Chromium with stealth-like arguments
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
                     "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled", "--disable-infobars"
+                    "--disable-blink-features=AutomationControlled"
                 ]
             )
+            # Use high-reputation iPhone UA and Google Referer
             context = await browser.new_context(
-                viewport={'width': 1280, 'height': 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                viewport={'width': 390, 'height': 844},
+                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+                extra_http_headers={"Referer": "https://www.google.com/"},
                 locale="fr-FR"
             )
             page = await context.new_page()
             
-            logger.info(f"Navigating to Desktop URL: {target_url}")
+            logger.info(f"Navigating to Mobile URL: {target_url}")
             await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(4000)
             
-            # 1. Bypass Login Modal / Overlay
-            await page.evaluate("""
-                () => {
-                    const selectors = ['div[role="dialog"]', 'div#login_popup', 'div#header_block', 'div.x1n2onr6.x1vjfegm'];
-                    selectors.forEach(s => {
-                        const elements = document.querySelectorAll(s);
-                        elements.forEach(el => {
-                            if (el && (el.innerText.toLowerCase().includes('se connecter') || el.innerText.toLowerCase().includes('log in'))) {
-                                el.remove();
-                            }
-                        });
-                    });
-                    document.body.style.overflow = 'auto'; // Re-enable scrolling
-                }
-            """)
+            # Dismiss 'Open App' or generic popups if they exist
+            await close_facebook_popup_x(page)
             
-            # Try to click explicit 'X' if visible
-            for x_selector in ['div[aria-label="Fermer"]', 'div[aria-label="Close"]', 'div[role="button"]:has-text("X")']:
-                try:
-                    btn = page.locator(x_selector).first
-                    if await btn.count() > 0 and await btn.is_visible():
-                        await btn.click(timeout=2000)
-                        logger.info(f"Closed login modal via {x_selector}")
-                except: pass
-
-            # 2. Select "All Comments" Filter
-            filter_labels = ["Plus pertinents", "Most relevant", "Commentaires"]
-            for label in filter_labels:
-                try:
-                    btn = page.get_by_text(label).first
-                    if await btn.count() > 0 and await btn.is_visible():
-                        await btn.click()
-                        await page.wait_for_timeout(1500)
-                        # Select "All"
-                        all_options = [
-                            "Toutes les réponses", "All comments", "Tous les commentaires",
-                            "Les plus récents", "Newest"
-                        ]
-                        for al in all_options:
-                            all_btn = page.get_by_text(al).first
-                            if await all_btn.count() > 0:
-                                await all_btn.click()
-                                logger.info(f"Selected '{al}' filter.")
-                                await page.wait_for_timeout(2500)
-                                break
-                        break
-                except: pass
-
-            # 3. Recursive Expansion & Extraction
+            # Recursive expansion loop
             stable_rounds = 0
-            for scroll_idx in range(120):
-                # Click "View more" buttons recursively
-                more_labels = [
-                    "Plus de commentaires", "View more comments", "réponses", "replies", 
-                    "voir plus", "view all", "afficher les"
+            for scroll_idx in range(150):
+                # 1. Click "View more comments" / "X previous comments" / "Replies"
+                # These are often the key to unlocking the full thread on mobile
+                more_selectors = [
+                    "Plus de commentaires", "View more comments", "voir les commentaires précédents",
+                    "previous comments", "réponses", "replies", "voir plus", "plus de"
                 ]
-                for ml in more_labels:
+                found_button = False
+                for label in more_selectors:
                     try:
-                        btns = page.get_by_text(re.compile(ml, re.I))
+                        # Case insensitive regex match for flexibility
+                        btns = page.get_by_text(re.compile(label, re.I))
                         count = await btns.count()
                         if count > 0:
-                            for i in range(min(count, 8)): # Click up to 8 buttons per round
+                            for i in range(min(count, 5)):
                                 b = btns.nth(i)
                                 if await b.is_visible():
-                                    await b.click(timeout=1200)
-                                    await page.wait_for_timeout(800)
+                                    await b.click(timeout=1500)
+                                    await page.wait_for_timeout(700)
+                                    found_button = True
                     except: pass
                 
-                # Extract using internal DOM heuristic
+                # 2. Extract using both DOM and Text heuristics
+                # DOM extraction is more robust for structure
                 batch = await extract_structured_comments_from_page(page)
-                
-                # Also fallback to body text if DOM fails
+                # Text extraction is better for "virtual" mobile feeds where DOM nodes are pruned
                 body_text = await page.locator("body").inner_text()
-                body_batch = extract_comments_from_body_text(body_text)
+                text_batch = extract_comments_from_body_text(body_text)
                 
                 new_found = 0
-                for c in (batch + body_batch):
+                for c in (batch + text_batch):
                     key = (c["user"].lower(), c["text"].lower())
                     if key not in seen_global:
                         all_unique_comments.append(c)
@@ -915,20 +875,28 @@ async def scrape_facebook_comments_better_way(url):
                 
                 if new_found > 0:
                     stable_rounds = 0
-                    logger.info(f"Better Way: Found {new_found} new (Total: {len(all_unique_comments)})")
+                    logger.info(f"Scraper: {new_found} new (Total unique: {len(all_unique_comments)})")
                 else:
                     stable_rounds += 1
                 
-                # Scroll the page or the active dialog if one exists
-                await page.evaluate("window.scrollBy(0, 1000)")
-                await page.wait_for_timeout(2000)
+                # 3. Intelligent Scrolling
+                # If we found no buttons and no news, scroll to trigger lazy loading
+                if not found_button or scroll_idx % 2 == 0:
+                    await page.evaluate("window.scrollBy(0, 800)")
+                    await page.wait_for_timeout(1000)
                 
-                if stable_rounds >= 35 and len(all_unique_comments) > 15:
+                # Exit early if we haven't seen anything new for a long time
+                if stable_rounds >= 40 and len(all_unique_comments) > 20:
+                    logger.info("Stabilized; stopping High-Yield loop.")
                     break
-            
+                    
+                if any(marker in body_text.lower() for marker in FACEBOOK_GATE_MARKERS):
+                    # Try to bypass if a gate appears mid-scroll
+                    await close_facebook_popup_x(page)
+
             await browser.close()
     except Exception as e:
-        logger.error(f"Better Way Error: {e}")
+        logger.error(f"High-Yield Error: {e}")
     finally:
         cleanup_chrome_runtime(runtime)
         
