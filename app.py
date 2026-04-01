@@ -361,21 +361,12 @@ def looks_like_profile_name_only(text, user=""):
         return True
     normalized_value = normalize_name_for_match(value)
     normalized_user = normalize_name_for_match(user)
+    
+    # Only filter if it's the user's own name (common in some scrapers' outputs)
     if normalized_user and normalized_value == normalized_user:
         return True
-    if any(char.isdigit() for char in normalized_value):
-        return False
-    if re.search(r"[\u0600-\u06FF]", normalized_value):
-        return False
-    if len(normalized_value) > 40:
-        return False
-    if len(normalized_value.split()) < 2 or len(normalized_value.split()) > 5:
-        return False
-    if re.fullmatch(r"[a-zà-öø-ÿ]+(?: [a-zà-öø-ÿ]+){1,4}", normalized_value):
-        return True
-    title_case_value = re.sub(r"\.+$", "", value).strip()
-    if re.fullmatch(r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’-]+(?: [A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’-]+){1,4}", title_case_value):
-        return True
+        
+    # We no longer filter by word patterns to avoid dropping valid short comments like "Good job" or "I agree".
     return False
 
 
@@ -714,22 +705,34 @@ async def scrape_facebook_comments_mobile(url):
                 await close_facebook_popup_x(page)
                 await try_select_all_comments(page)
 
+                all_unique_comments = []
+                seen_global = set()
                 stable_rounds = 0
-                for _ in range(50):
+                max_stable_threshold = 25
+                for _ in range(90):
                     await recover_mobile_post_page(page, target_url)
                     await close_facebook_popup_x(page)
                     await wait_for_facebook_loading_to_finish(page)
 
                     # Periodically try to find and click "view more" style buttons
                     try:
-                        view_more_labels = ["view more comments", "plus de commentaires", "afficher plus de commentaires", "view previous comments", "voir les commentaires précédents"]
+                        view_more_labels = [
+                            "view more comments", "plus de commentaires", "afficher plus de commentaires", 
+                            "view previous comments", "voir les commentaires précédents",
+                            "réponse", "réponses", "reply", "replies", "afficher les", "view all", "plus de",
+                            "voir plus", "voir tout"
+                        ]
                         for label in view_more_labels:
-                            btn = page.get_by_text(re.compile(label, re.I)).first
-                            if await btn.count() > 0 and await btn.is_visible():
-                                await btn.click(timeout=1500)
-                                await page.wait_for_timeout(1200)
-                                logger.info(f"Clicked 'view more' button with label: {label}")
-                                break
+                            btns = page.get_by_text(re.compile(label, re.I))
+                            count = await btns.count()
+                            if count > 0:
+                                for btn_idx in range(min(count, 3)):
+                                    btn = btns.nth(btn_idx)
+                                    if await btn.is_visible():
+                                        await btn.click(timeout=1000)
+                                        await page.wait_for_timeout(800)
+                                        logger.info(f"Clicked 'view more' button hit: {label}")
+                                        break
                     except Exception:
                         pass
 
@@ -770,7 +773,8 @@ async def scrape_facebook_comments_mobile(url):
                         logger.info(f"detected login gate; close attempted={close_attempted} via label-button")
                         await recover_mobile_post_page(page, target_url)
 
-                    if stable_rounds >= 10:
+                    if stable_rounds >= max_stable_threshold:
+                        logger.info(f"Stabilized for {max_stable_threshold} rounds; stopping early.")
                         break
 
                 await browser.close()
