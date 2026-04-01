@@ -1186,45 +1186,55 @@ def format_ai_brief_error(error):
         return "⚠️ Could not generate AI brief: Ollama is not reachable on http://localhost:11434."
     return f"⚠️ Could not generate AI brief: {message}"
 
-def generate_executive_brief(df):
+def generate_executive_brief_stream(df):
+    """
+    Generates a 3-sentence summary of the comments using Ollama/Gemma3 with streaming support.
+    """
     try:
         top_issues_all = df[df["High Priority"] == "🚨 YES"]["Comment"].tolist()
         general_all = df["Comment"].tolist()
+        
+        # Optimized attempts: Start with reasonable context, then shrink
         attempts = [
-            {"top_n": 8, "general_n": 12, "num_ctx": 2048},
-            {"top_n": 5, "general_n": 8, "num_ctx": 1024},
-            {"top_n": 3, "general_n": 5, "num_ctx": 768},
+            {"top_n": 6, "general_n": 10, "num_ctx": 1024},
+            {"top_n": 3, "general_n": 5, "num_ctx": 512},
         ]
-        last_error = None
-
+        
         for attempt in attempts:
             top_issues = top_issues_all[:attempt["top_n"]]
             general = general_all[:attempt["general_n"]]
+            
             prompt = (
-                "You are an expert Social Media Sentiment Analyst. I collected comments from Algerian users on a recent post. "
-                "Write a strict 3-sentence executive brief. Mention the main source of frustration or anger if present, "
-                "the overall sentiment, and one short business takeaway. Keep it concise and professional.\n\n"
+                "You are an expert Social Media Sentiment Analyst for the Algerian market. "
+                "Write a strict 3-sentence executive brief based on these comments. "
+                "Mention the main source of frustration or anger if present, the overall sentiment, "
+                "and one short business takeaway. Keep it concise and professional.\n\n"
                 f"High Priority Comments: {top_issues}\n"
                 f"General Comments: {general}"
             )
+            
             try:
+                # Use litellm with stream=True
                 response = litellm.completion(
                     model="ollama/gemma3:4b",
                     messages=[{"role": "user", "content": prompt}],
                     api_base="http://localhost:11434",
                     num_ctx=attempt["num_ctx"],
+                    stream=True,
+                    timeout=35 # Fast failover if model is hanging
                 )
-                return response.choices[0].message.content.strip()
+                for chunk in response:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        yield content
+                return # Successful completion
             except Exception as error:
-                last_error = error
-                logger.warning(
-                    f"AI brief attempt failed (num_ctx={attempt['num_ctx']}, top_n={attempt['top_n']}, general_n={attempt['general_n']}): {error}"
-                )
-
-        raise last_error
+                logger.warning(f"AI brief attempt failed (ctx={attempt['num_ctx']}): {error}")
+                if attempt == attempts[-1]:
+                    yield f"Analysis partially failed: {str(error)[:100]}..."
     except Exception as e:
-        logger.error(f"Error generating AI Brief: {e}")
-        return format_ai_brief_error(e)
+        logger.error(f"Error in streaming AI Brief: {e}")
+        yield "An unexpected error occurred during AI analysis."
 
 
 def render_results(results):
@@ -1264,12 +1274,26 @@ def render_results(results):
     # ── AI Executive Brief ──────────────────────────────────────────────────
     st.markdown('<div class="section-title">AI Executive Brief</div>', unsafe_allow_html=True)
     if st.button("Generate Summary", type="primary"):
-        with st.spinner("Analyzing feed..."):
-            brief = generate_executive_brief(df)
-            st.markdown(f"""
+        container = st.empty()
+        # Custom briefing box styling
+        container.markdown("""
             <div style="background:#181818; border:1px solid #333; padding:32px 40px; margin-bottom:2rem;">
-                <div style="color:#d0d0d0; font-size:0.95rem; line-height:1.8; font-family:serif; font-style:italic;">"{brief}"</div>
+                <div id="brief-content" style="color:#d0d0d0; font-size:0.95rem; line-height:1.8; font-family:serif; font-style:italic;">
+                    Synthesizing trends...
+                </div>
             </div>
+        """, unsafe_allow_html=True)
+        
+        full_response = ""
+        # Implementation of streaming display
+        for chunk in generate_executive_brief_stream(df):
+            full_response += chunk
+            container.markdown(f"""
+                <div style="background:#181818; border:1px solid #333; padding:32px 40px; margin-bottom:2rem;">
+                    <div style="color:#d0d0d0; font-size:0.95rem; line-height:1.8; font-family:serif; font-style:italic;">
+                        "{full_response}"
+                    </div>
+                </div>
             """, unsafe_allow_html=True)
 
     # ── Charts ─────────────────────────────────────────────────────────────
