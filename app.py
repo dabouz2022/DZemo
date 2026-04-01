@@ -87,7 +87,7 @@ def get_free_tcp_port():
         return sock.getsockname()[1]
 
 
-def wait_for_cdp_ready(port, timeout=30):
+def wait_for_cdp_ready(port, timeout=60):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -141,12 +141,11 @@ def launch_real_chrome_for_cdp(url, profile, mobile_mode=True):
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--disable-zygote",
     ]
 
-    # If on Linux and no virtual display was successfully started, use --headless=new
     if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
-        # We check if a display object was actually returned and started elsewhere,
-        # but as a heuristic, adding --headless=new is safer on server CLI.
         args.append("--headless=new")
 
     if mobile_mode:
@@ -159,12 +158,15 @@ def launch_real_chrome_for_cdp(url, profile, mobile_mode=True):
     process = subprocess.Popen(
         args,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE, # Capture stderr for diagnosis if needed
         creationflags=creationflags,
     )
 
-    if not wait_for_cdp_ready(port, timeout=35):
+    if not wait_for_cdp_ready(port, timeout=65):
         try:
+            # If fail, read some stderr
+            err_data = process.stderr.read(1024).decode('utf-8', errors='replace')
+            logger.warning(f"Chrome CDP port did not become ready. Stderr: {err_data}")
             process.terminate()
         except Exception:
             pass
@@ -307,11 +309,7 @@ FACEBOOK_GATE_MARKERS = [
 ]
 
 FACEBOOK_END_MARKERS = [
-    "publications récentes",
-    "recent posts",
     "neueste beiträge",
-    "related pages",
-    "pages similaires",
 ]
 
 FACEBOOK_TIMESTAMP_RE = re.compile(
