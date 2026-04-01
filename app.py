@@ -1207,6 +1207,8 @@ def generate_executive_brief_stream(df):
             prompt = (
                 "You are an expert Social Media Sentiment Analyst for the Algerian market. "
                 "Write a strict 3-sentence executive brief based on these comments. "
+                "CRITICAL: Start your response IMMEDIATELY with the first sentence of the brief. "
+                "DO NOT include any introductory phrases like 'Here is the brief' or 'Analyzing the sentiment'. "
                 "Mention the main source of frustration or anger if present, the overall sentiment, "
                 "and one short business takeaway. Keep it concise and professional.\n\n"
                 f"High Priority Comments: {top_issues}\n"
