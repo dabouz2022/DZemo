@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableDelayedExpansion
-title DzEmotion - Ultimate One-Click Installer ^& Launcher
+title EMODZ - Ultimate One-Click Installer ^& Launcher
 color 0b
 
 echo ===============================================================
-echo                DzEmotion Installation ^& Launcher
+echo                EMODZ Installation ^& Launcher
 echo ===============================================================
 echo This script will automatically download and install:
 echo 1. Python (if missing)
@@ -115,7 +115,7 @@ echo.
 :: 5. START DASHBOARD
 :: ------------------------------------------------------------------
 echo ===============================================================
-echo Starting the DzEmotion Dashboard...
+echo Starting the EMODZ Dashboard...
 echo Press CTRL+C in this window to stop the server.
 echo ===============================================================
 echo.

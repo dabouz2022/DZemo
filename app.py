@@ -202,7 +202,7 @@ def cleanup_chrome_runtime(runtime):
             pass
 
 # Page config
-st.set_page_config(page_title="DzEmotion Dashboard", page_icon="🇩🇿", layout="wide")
+st.set_page_config(page_title="EMODZ Dashboard", page_icon="🇩🇿", layout="wide")
 
 EMOTION_CLASSES = [
     'Satisfaction', 'Frustration', 'Urgency', 'Sarcasm', 'Inquiry',
@@ -829,16 +829,15 @@ async def scrape_facebook_comments_better_way(url):
             
             logger.info(f"Navigating to Mobile URL: {target_url}")
             await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(4000)
+            await page.wait_for_timeout(2000)
             
             # Dismiss 'Open App' or generic popups if they exist
             await close_facebook_popup_x(page)
             
             # Recursive expansion loop
             stable_rounds = 0
-            for scroll_idx in range(150):
+            for scroll_idx in range(120):
                 # 1. Click "View more comments" / "X previous comments" / "Replies"
-                # These are often the key to unlocking the full thread on mobile
                 more_selectors = [
                     "Plus de commentaires", "View more comments", "voir les commentaires précédents",
                     "previous comments", "réponses", "replies", "voir plus", "plus de"
@@ -846,22 +845,19 @@ async def scrape_facebook_comments_better_way(url):
                 found_button = False
                 for label in more_selectors:
                     try:
-                        # Case insensitive regex match for flexibility
                         btns = page.get_by_text(re.compile(label, re.I))
                         count = await btns.count()
                         if count > 0:
-                            for i in range(min(count, 5)):
+                            for i in range(min(count, 8)):
                                 b = btns.nth(i)
                                 if await b.is_visible():
-                                    await b.click(timeout=1500)
-                                    await page.wait_for_timeout(700)
+                                    await b.click(timeout=800)
+                                    await page.wait_for_timeout(400)
                                     found_button = True
                     except: pass
                 
                 # 2. Extract using both DOM and Text heuristics
-                # DOM extraction is more robust for structure
                 batch = await extract_structured_comments_from_page(page)
-                # Text extraction is better for "virtual" mobile feeds where DOM nodes are pruned
                 body_text = await page.locator("body").inner_text()
                 text_batch = extract_comments_from_body_text(body_text)
                 
@@ -879,19 +875,17 @@ async def scrape_facebook_comments_better_way(url):
                 else:
                     stable_rounds += 1
                 
-                # 3. Intelligent Scrolling
-                # If we found no buttons and no news, scroll to trigger lazy loading
-                if not found_button or scroll_idx % 2 == 0:
-                    await page.evaluate("window.scrollBy(0, 800)")
-                    await page.wait_for_timeout(1000)
-                
                 # Exit early if we haven't seen anything new for a long time
-                if stable_rounds >= 40 and len(all_unique_comments) > 20:
+                if stable_rounds >= 30 and len(all_unique_comments) > 15:
                     logger.info("Stabilized; stopping High-Yield loop.")
                     break
+
+                # 3. Intelligent Scrolling
+                if not found_button or scroll_idx % 2 == 0:
+                    await page.evaluate("window.scrollBy(0, 1000)")
+                    await page.wait_for_timeout(600)
                     
                 if any(marker in body_text.lower() for marker in FACEBOOK_GATE_MARKERS):
-                    # Try to bypass if a gate appears mid-scroll
                     await close_facebook_popup_x(page)
 
             await browser.close()
@@ -1355,7 +1349,7 @@ def render_results(results):
     # ── Download ───────────────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     csv_data = df.to_csv(index=False).encode('utf-8')
-    st.download_button("⬇️ Download Results as CSV", csv_data, "dzemotions_results.csv", "text/csv")
+    st.download_button("⬇️ Download Results as CSV", csv_data, "emodz_results.csv", "text/csv")
 
 
 def main():
@@ -1366,7 +1360,7 @@ def main():
         st.markdown("""
         <div style='text-align:center;padding:16px 0 24px;'>
             <div style='font-size:2.5rem;margin-bottom:8px;'>🇩🇿</div>
-            <div style='font-size:1.4rem;font-weight:800;color:#ffffff;font-family:"Outfit";letter-spacing:-0.5px;'>DzEmotion</div>
+            <div style='font-size:1.4rem;font-weight:800;color:#ffffff;font-family:"Outfit";letter-spacing:-0.5px;'>EMODZ</div>
             <div style='font-size:0.7rem;color:#888;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;'>Algerian Sentiment Hub</div>
         </div>
         
@@ -1407,7 +1401,7 @@ def main():
         <div class='local-badge'>● Local Mode Active</div>
     </div>
     <div class='top-kicker'>Social Content Analytics</div>
-    <div class='gradient-title'>DZEMOTION</div>
+    <div class='gradient-title'>EMODZ</div>
     <div class='subtitle'>The definitive sentiment analysis engine for Algerian social media</div>
     """, unsafe_allow_html=True)
 

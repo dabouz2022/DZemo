@@ -1,4 +1,4 @@
-# DzEmotion Dashboard
+# EMODZ Dashboard
 
 The definitive sentiment analysis engine for Algerian social media (Darija, Arabic, French) that focuses on privacy and local processing and data security.
 
@@ -14,7 +14,7 @@ Make sure you have [Git LFS](https://git-lfs.com/) installed *before* cloning so
 git lfs install
 # Clone repository
 git clone <your-repository-url>
-cd DzEmotion
+cd EMODZ
 ```
 
 **2. Run the Auto-Installer Launcher**
