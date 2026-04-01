@@ -87,9 +87,13 @@ def wait_for_cdp_ready(port, timeout=30):
 
 def maybe_start_virtual_display(width, height):
     if sys.platform.startswith("linux") and not os.environ.get("DISPLAY") and Display:
-        display = Display(visible=False, size=(max(width, 1280), max(height, 900)))
-        display.start()
-        return display
+        try:
+            display = Display(visible=False, size=(max(width, 1280), max(height, 900)))
+            display.start()
+            logger.info("Started virtual display (Xvfb) for headless Linux environment.")
+            return display
+        except Exception as e:
+            logger.warning(f"Failed to start pyvirtualdisplay/Xvfb: {e}. Falling back to --headless=new mode.")
     return nullcontext()
 
 
@@ -120,7 +124,18 @@ def launch_real_chrome_for_cdp(url, profile, mobile_mode=True):
         "--disable-extensions",
         "--disable-features=Translate,OptimizationHints,MediaRouter",
         "--new-window",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
     ]
+
+    # If on Linux and no virtual display was successfully started, use --headless=new
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        # We check if a display object was actually returned and started elsewhere,
+        # but as a heuristic, adding --headless=new is safer on server CLI.
+        args.append("--headless=new")
+
     if mobile_mode:
         args.append(
             f"--user-agent={profile['user_agent']}"
