@@ -2,7 +2,7 @@
 
 EMODZ is a high-performance **Emotion Analysis AI** specifically engineered for the linguistic complexities of the Algerian digital landscape. Unlike generic sentiment tools, EMODZ is powered by a proprietary **DziriBERT (Emotion Edition)** model, custom-trained and optimized in-house.
 
-**[🌐 Access EMODZ Dashboard (DZMO)](http://209.38.249.154:8501)**
+**[🌐 Access EMODZ Dashboard (DZMO)](http://209.38.249.154/)**
 
 ---
 
