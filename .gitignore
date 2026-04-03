@@ -23,3 +23,12 @@ venv.bak/
 .idea/
 .DS_Store
 Thumbs.db
+
+# EMODZ Debug & Runtime
+.runtime/
+.external/
+tmp_fb/
+*.png
+*.jpg
+*.html
+verify_script.py
