@@ -24,6 +24,10 @@ venv.bak/
 .DS_Store
 Thumbs.db
 
+# EMODZ Core Files
+*.py
+!app.py
+
 # EMODZ Debug & Runtime
 .runtime/
 .external/
@@ -32,3 +36,11 @@ tmp_fb/
 *.jpg
 *.html
 verify_script.py
+verify_and_deploy.py
+check_server_resources.py
+test_*.py
+check_*.py
+diagnose_*.py
+download_*.py
+execute_*.py
+verify_test.py
