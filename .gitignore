@@ -27,6 +27,7 @@ Thumbs.db
 # EMODZ Core Files
 *.py
 !app.py
+!Working_V1_1_.ipynb
 
 # EMODZ Debug & Runtime
 .runtime/
